@@ -1,0 +1,7 @@
+general
+.mypy_cache
+__pycache__
+testfiles
+.flake8
+.style.yapf
+video.o
