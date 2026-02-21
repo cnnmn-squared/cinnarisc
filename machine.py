@@ -1,61 +1,12 @@
-from enum import IntEnum
 from typing import Self, Literal, TypeAlias
 from devices import Bus
+from xlibx import Trap, TCause, XLEN
 
-XLEN: int = 32
 IALIGN: int = 32
-
 RESET_VECTOR = 0x00001000
 
 DECODEVALS: TypeAlias = dict[Literal["opcode", "7:11", "12:14", "15:19", "20:24",
                                      "25:31", "12:31", "20:31"], int]
-
-
-class TCause(IntEnum):
-    INSTRUCTION_ADDRESS_MISALIGNED = 0x0
-    INSTRUCTION_ACCESS_FAULT = 0x1
-    ILLEGAL_INSTRUCTION = 0x2
-    BREAKPOINT = 0x3
-
-    LOAD_ADDRESS_MISALIGNED = 0x4
-    LOAD_ACCESS_FAULT = 0x5
-
-    STORE_ADDRESS_MISALIGNED = 0x6
-    STORE_ACCESS_FAULT = 0x7
-
-    # Environment Faults
-
-    ENV_CALL_FROM_U = 0x8
-    ENV_CALL_FROM_S = 0x9
-    # 0xA reserved
-    ENV_CALL_FROM_M = 0xB
-
-    # Page faults
-    INSTRUCTION_PAGE_FAULT = 0xC
-    LOAD_PAGE_FAULT = 0xD
-    # 0xE reserved
-    STORE_PAGE_FAULT = 0xf
-
-    # Misc
-    DOUBLE_TRAP = 0x10
-    # 0x11 reserved
-    SOFTWARE_CHECK = 0x12
-    HARDWARE_ERROR = 0x13
-
-    # 0x14-0x17 reserved
-    # 0x18-0x1f designated for custom
-    DEVICE_FAULT = 0x18
-    INVALID_DEVICE_REGION = 0x19
-
-    # 0x20-0x2f reserved
-    # 0x30-0x3f designated for custom
-    # 0x40>> reserved
-
-
-class Trap(Exception):
-
-    def __init__(self, cause: TCause):  # noqa
-        self.cause = cause
 
 
 class MintDBWbounded:
@@ -159,59 +110,6 @@ class ALU:
         return a >> shamt
 
 
-class Memory:
-
-    def __init__(self, size: int) -> None:
-        if size > 2**XLEN:
-            raise Exception(f"`size` is too large! limit is 2^{XLEN}, size({size})")
-
-        self.data = bytearray(size)
-
-    def _addrsafe(self, addr: int) -> None:
-        if addr < 0:
-            raise Trap(TCause.HARDWARE_ERROR)
-
-    def _addrbounds(self, addr: int) -> int:
-        return addr % self.data.__len__()
-
-    def lvfab(self, address: int) -> int:
-        return self.data[address]
-
-    def sviab(self, address: int, value: int) -> None:
-        if value > 0xff:
-            raise Trap(TCause.STORE_ACCESS_FAULT)
-        self.data[address] = value
-
-    def load_half(self, address: int) -> int:
-        if address % 2 != 0:
-            raise Trap(TCause.LOAD_ADDRESS_MISALIGNED)
-
-        return (self.lvfab(address + 1) << 8) + self.lvfab(address)
-
-    def load_word(self, address: int) -> int:
-        if address % 4 != 0:
-            raise Trap(TCause.LOAD_ADDRESS_MISALIGNED)
-
-        return (self.data[address + 3] << 24) + (self.data[
-            address + 2] << 16) + (self.data[address + 1] << 8) + self.data[address]
-
-    def store_half(self, address: int, value: int) -> None:
-        if address % 2 != 0:
-            raise Trap(TCause.STORE_ADDRESS_MISALIGNED)
-
-        self.data[address] = value & 0xff
-        self.data[address + 1] = (value >> 8) & 0xff
-
-    def store_word(self, address: int, value: int) -> None:
-        if address % 4 != 0:
-            raise Trap(TCause.STORE_ADDRESS_MISALIGNED)
-
-        self.data[address] = value & 0xff
-        self.data[address + 1] = (value >> 8) & 0xff
-        self.data[address + 2] = (value >> 16) & 0xff
-        self.data[address + 3] = (value >> 24) & 0xff
-
-
 class InstructionDecoder:
 
     @staticmethod
@@ -255,7 +153,7 @@ class InstructionDecoder:
     @staticmethod
     def d20_31(instr: int) -> int:
         # preset 7, imm12
-        return InstructionDecoder.gimme(instr, 12, 31)
+        return InstructionDecoder.gimme(instr, 20, 31)
 
     @staticmethod
     def decode_simples(instr: int) -> DECODEVALS:
@@ -273,7 +171,7 @@ class InstructionDecoder:
 
 class Core:
 
-    def __init__(self, glblmem: Memory, bus: Bus) -> None:
+    def __init__(self, bus: Bus) -> None:
         self.gpr: dict[int, MintDBWbounded] = {
             0: MintDBWbounded(0, XLEN),
             1: MintDBWbounded(0, XLEN),
@@ -318,6 +216,8 @@ class Core:
 
         self.gpr[0].v = 0
         decoded: DECODEVALS = InstructionDecoder.decode_simples(instruction)
+
+        #print(f"instruction @ {hex(self.pc)} {instruction}")
 
         match decoded["opcode"]:
             case 0b0110111:  # lui
@@ -404,9 +304,9 @@ class Core:
 
                 fn3 = decoded["12:14"]
 
-                print(rs1, rs2, imm, fn3)
+                #print(rs1, rs2, imm, fn3)
 
-                self.bus.store(rs1 + imm, rs2.v)
+                self.bus.store(rs1 + imm, rs2.v, fn3)
 
                 #match fn3:
                 #   case 0b000:
@@ -420,16 +320,19 @@ class Core:
 #                      self.memsh.store_word(rs1 + imm, rs2.v & 0xffff_ffff)
 
             case 0b0010011:  # imm,rs1->rd
-                imm = ALU.sign(MintDBWbounded(decoded["20:31"], 12))
+                imma = MintDBWbounded(decoded["20:31"], 12)
+                imm = ALU.sign(imma)
                 rd = self.gpr[decoded["7:11"]]
 
                 fn3 = decoded["12:14"]
                 rs1 = int(self.gpr[decoded["15:19"]])
 
-                print(imm, rd, rs1, fn3)
+                #print("immediate to rd")
+                #print(imm, imma)
 
                 if fn3 == 0b000:
-                    rd = rd._child(rs1 + imm)
+                    #print("addi")
+                    rd._childself(rs1 + imm)
                 elif fn3 == 0b010:
                     # slti
                     pass
@@ -440,20 +343,20 @@ class Core:
 
                 elif fn3 == 0b100:
                     # xori
-                    rd = rd._child(rs1 ^ imm)
+                    rd._childself(rs1 ^ imm)
 
                 elif fn3 == 0b110:
                     # ori
-                    rd = rd._child(rs1 | imm)
+                    rd._childself(rs1 | imm)
 
                 elif fn3 == 0b111:
                     # andi
-                    rd = rd._child(rs1 & imm)
+                    rd._childself(rs1 & imm)
 
                 elif fn3 == 0b001:
                     # slli
                     shamt = decoded["20:24"]
-                    rd = rd._child(ALU.lshift(rs1, shamt))
+                    rd._childself(ALU.lshift(rs1, shamt))
 
                 elif fn3 == 0b101:
                     # srli / srai
@@ -523,6 +426,8 @@ class Core:
             case _:
                 raise Trap(TCause.ILLEGAL_INSTRUCTION)
 
+        #print(self.gpr)
+
         self.pc += 4
 
     def load_instruction(self) -> int:
@@ -531,6 +436,6 @@ class Core:
         except:
             raise Trap(TCause.INSTRUCTION_ADDRESS_MISALIGNED)
 
-        print(instruction.to_bytes(length=4, byteorder="little"))
+        #print(instruction.to_bytes(length=4, byteorder="little"))
 
         return instruction

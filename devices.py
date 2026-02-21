@@ -1,5 +1,5 @@
 import pygame
-from machine import Memory, Trap, TCause
+from xlibx import Trap, TCause, XLEN
 from typing import Self
 from dataclasses import dataclass
 
@@ -8,6 +8,59 @@ from dataclasses import dataclass
 class Region:
     start: int
     end: int
+
+
+class Memory:
+
+    def __init__(self, size: int) -> None:
+        if size > 2**XLEN:
+            raise Exception(f"`size` is too large! limit is 2^{XLEN}, size({size})")
+
+        self.data = bytearray(size)
+
+    def _addrsafe(self, addr: int) -> None:
+        if addr < 0:
+            raise Trap(TCause.HARDWARE_ERROR)
+
+    def _addrbounds(self, addr: int) -> int:
+        return addr % self.data.__len__()
+
+    def lvfab(self, address: int) -> int:
+        return self.data[address]
+
+    def sviab(self, address: int, value: int) -> None:
+        if value > 0xff:
+            raise Trap(TCause.STORE_ACCESS_FAULT)
+        self.data[address] = value
+
+    def load_half(self, address: int) -> int:
+        if address % 2 != 0:
+            raise Trap(TCause.LOAD_ADDRESS_MISALIGNED)
+
+        return (self.lvfab(address + 1) << 8) + self.lvfab(address)
+
+    def load_word(self, address: int) -> int:
+        if address % 4 != 0:
+            raise Trap(TCause.LOAD_ADDRESS_MISALIGNED)
+
+        return (self.data[address + 3] << 24) + (self.data[
+            address + 2] << 16) + (self.data[address + 1] << 8) + self.data[address]
+
+    def store_half(self, address: int, value: int) -> None:
+        if address % 2 != 0:
+            raise Trap(TCause.STORE_ADDRESS_MISALIGNED)
+
+        self.data[address] = value & 0xff
+        self.data[address + 1] = (value >> 8) & 0xff
+
+    def store_word(self, address: int, value: int) -> None:
+        if address % 4 != 0:
+            raise Trap(TCause.STORE_ADDRESS_MISALIGNED)
+
+        self.data[address] = value & 0xff
+        self.data[address + 1] = (value >> 8) & 0xff
+        self.data[address + 2] = (value >> 16) & 0xff
+        self.data[address + 3] = (value >> 24) & 0xff
 
 
 class Display:
@@ -38,13 +91,7 @@ class Display:
         sizey: int
         renderframe: int
 
-    def __init__(
-        self,
-        display: pygame.Surface,
-        memsh: Memory,
-        regst: int,
-        regend: int,
-    ) -> None:
+    def __init__(self, display: pygame.Surface, size: int) -> None:
         """
         memory segmentation:
         Display does not use a bus interface, magic addresses are used.
@@ -59,8 +106,8 @@ class Display:
 
         :param display: parent display to be blit on
         :type display: pygame.Surface
-        :param memsh: shared memory
-        :type memsh: Memory
+        :param vram: shared memory
+        :type vram: Memory
         :param regst: region start (memory location)
         :type regst: int
         :param regend: region end (always > regst + 6)
@@ -71,18 +118,13 @@ class Display:
 
         self.DEFAULTSCR = (160, 120)
 
-        self.alloc_start = regst
-        self.alloc_end = regend
-        self.allocregion = (regst, regend)  # regend safety fallback
-        self.framebuffer_region = (regst + self.HEADERSIZE, regend)
+        self.alloc_end = size
+        self.framebuffer_region = (self.HEADERSIZE, size)
 
-        if regend < (regst + 160 * 120) + self.HEADERSIZE:
+        if size < (160 * 120) + self.HEADERSIZE:
             raise Trap(TCause.INVALID_DEVICE_REGION)
 
-        if regend > memsh.data.__len__():
-            raise Trap(TCause.INVALID_DEVICE_REGION)
-
-        self.memsh: Memory = memsh
+        self.vram: Memory = Memory(size)  # 4c08
         self.rcycle: int = 0
         self.resx: int = self.DEFAULTSCR[0]
         self.resy: int = self.DEFAULTSCR[1]
@@ -90,10 +132,7 @@ class Display:
 
         self.rendermode: int = 0x00
 
-        self.headeraddr = self.HeaderAddresses(
-            self.alloc_start + 0, self.alloc_start + 1, self.alloc_start + 2,
-            self.alloc_start + 4, self.alloc_start + 6
-        )
+        self.headeraddr = self.HeaderAddresses(0, 1, 2, 4, 6)
         # b_connection:0 b_rendermode:1 h_sizex:2(3) h_sizey:4(5) b_renderf:6 fill
 
         self.connection_conf = False
@@ -124,17 +163,17 @@ class Display:
     def tick(self) -> None:
         for event in pygame.event.get():
             print(event.type)  # pygame sideeffect
-        self.connection_conf = True if self.memsh.lvfab(
-            self.alloc_start
+        self.connection_conf = True if self.vram.lvfab(
+            self.headeraddr.connection
         ) == 1 else False
 
         self.reiter += 1
         if not self.connection_conf:
 
-            self.rendermode = self.memsh.lvfab(self.headeraddr.rendermode)
+            self.rendermode = self.vram.lvfab(self.headeraddr.rendermode)
 
-            resxc = self.memsh.load_half(self.headeraddr.sizex)
-            resyc = self.memsh.load_half(self.headeraddr.sizey)
+            resxc = self.vram.load_half(self.headeraddr.sizex)
+            resyc = self.vram.load_half(self.headeraddr.sizey)
             self.resx = resxc if resxc != 0 else self.DEFAULTSCR[0]
             self.resy = resyc if resyc != 0 else self.DEFAULTSCR[1]
             self.horizlszm = self.resx * 3 if self.rendermode == 0x02 else self.resx
@@ -147,14 +186,14 @@ class Display:
                 self.render(self.NOCONNECTION)
             return
 
-        self.renderf = True if self.memsh.lvfab(
+        self.renderf = True if self.vram.lvfab(
             self.headeraddr.renderframe
         ) == 1 else False
 
         self.horizlszm = self.resx * 3 if self.rendermode == 0x02 else self.resx
 
         secst = self.framebuffer_region[0] + self.static_horizlszm * self.rcycle
-        section: bytes = self.memsh.data[secst:secst + self.horizlszm]
+        section: bytes = self.vram.data[secst:secst + self.horizlszm]
         #print(section)
 
         sfp: int = 0
@@ -181,17 +220,7 @@ class Display:
 
             chp += 1
 
-        #print(self.rendermode)
-        #self.rendermode = self.memsh.lvfab(self.headeraddr.rendermode)
-        #print(self.rendermode)
-
-        #print(self.renderf)
-        if self.renderf == True or self.renderf == 1:
-            #print("render")
-            self.render(self.screen)
-
-            self.memsh.sviab(self.headeraddr.renderframe, 0)
-            self.rendermode = self.memsh.lvfab(self.headeraddr.rendermode)
+        self.rendermode = self.vram.lvfab(self.headeraddr.rendermode)
 
         self.rcycle += 1
         if self.rcycle > self.static_resy:
@@ -199,7 +228,7 @@ class Display:
 
             self.static_horizlszm = self.horizlszm  # so resolution doesnt change until full frame complete
             self.static_resy = self.resy  # so it wont infinitely continue
-            self.rendermode = self.memsh.lvfab(self.headeraddr.rendermode)
+            # self.rendermode = self.vram.lvfab(self.headeraddr.rendermode)
 
             self.screen = pygame.transform.scale(self.screen, (self.resx, self.resy))
 
@@ -242,7 +271,7 @@ class Bus:
     @dataclass
     class Device:
         region: Region
-        device: UART | Memory | None
+        device: UART | Memory | Display | None
 
     def __init__(self, devices: list[Device]) -> None:
         # collision scan
@@ -273,6 +302,9 @@ class Bus:
             case Memory():
                 load_type = information
 
+                print(load_type, addr)
+                print(condev.device.data[0x1000:0x1010])
+
                 if load_type == 0:
                     return condev.device.lvfab(addr)
                 elif load_type == 1:
@@ -287,5 +319,38 @@ class Bus:
 
         raise Trap(TCause.LOAD_ACCESS_FAULT)
 
-    def store(self, addr: int, value: int) -> None:
-        pass
+    def store(self, addr: int, value: int, information: int) -> None:
+        condev = self._fdra(addr)
+
+        match condev.device:
+            case UART():
+                raise Trap(TCause.LOAD_ACCESS_FAULT)
+
+            case Memory():
+                load_type = information
+
+                if load_type == 0b000:
+                    condev.device.sviab(addr, value & 0xff)
+                elif load_type == 0b001:
+                    condev.device.store_half(addr, value & 0xffff)
+                elif load_type == 0b010:
+                    condev.device.store_word(addr, value & 0xffff_ffff)
+
+                return
+
+            case Display():
+                store_type = information
+
+                if (addr - condev.region.start) == condev.device.headeraddr.renderframe:
+                    condev.device.render(condev.device.screen)
+
+                if store_type == 0b000:
+                    condev.device.vram.sviab(addr - condev.region.start, value)
+                elif store_type == 0b001:
+                    condev.device.vram.store_half(addr - condev.region.start, value)
+                elif store_type == 0b010:
+                    condev.device.vram.store_word(addr - condev.region.start, value)
+
+                return
+        print(condev.device)
+        raise Trap(TCause.STORE_ACCESS_FAULT)
