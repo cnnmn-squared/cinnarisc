@@ -2,11 +2,16 @@ from typing import Self, Literal, TypeAlias
 from devices import Bus
 from xlibx import Trap, TCause, XLEN
 
+DEBUG = False
 IALIGN: int = 32
 RESET_VECTOR = 0x00001000
 
 DECODEVALS: TypeAlias = dict[Literal["opcode", "7:11", "12:14", "15:19", "20:24",
                                      "25:31", "12:31", "20:31"], int]
+
+
+def log(*values: object) -> None:
+    print(values) if DEBUG else None
 
 
 class MintDBWbounded:
@@ -217,18 +222,23 @@ class Core:
         self.gpr[0].v = 0
         decoded: DECODEVALS = InstructionDecoder.decode_simples(instruction)
 
-        #print(f"instruction @ {hex(self.pc)} {instruction}")
+        log(f"instruction @ {hex(self.pc)} {hex(instruction)} {bin(instruction)}")
 
         match decoded["opcode"]:
             case 0b0110111:  # lui
+                log("lui")
                 rd = self.gpr[decoded["7:11"]]
-                rd = rd._child(decoded["12:31"] << 12)
+                rd._childself(decoded["12:31"] << 12)
 
             case 0b0010111:  # auipc
+                log("auipc")
+
                 rd = self.gpr[decoded["7:11"]]
-                rd = rd._child((self.pc + decoded["12:31"]) << 12)
+                rd._childself((self.pc + decoded["12:31"]) << 12)
 
             case 0b1101111:  # jal
+                log("jal")
+
                 rd = self.gpr[decoded["7:11"]]
                 # complex deconstruction
                 s12_19 = InstructionDecoder.gimme(instruction, 12, 19)
@@ -239,18 +249,22 @@ class Core:
                 recons = MintDBWbounded(((s20 << 20) + (s12_19 << 12) +
                                          (s11 << 11) + s1_10) << 1, 20)
 
-                rd = rd._child(self.pc + 2)
+                rd._childself(self.pc + 2)
                 self.pc += ALU.sign(recons)
 
             case 0b1100111:  # jalr
+                log("jalr")
+
                 rd = self.gpr[decoded["7:11"]]
                 rs1 = int(self.gpr[decoded["15:19"]])
                 imm = decoded["20:31"]
 
-                rd = rd._child(self.pc + 2)
+                rd._childself(self.pc + 2)
                 self.pc = rs1 + imm
 
             case 0b1100011:  # branch
+                log("branch")
+
                 rd = self.gpr[decoded["7:11"]]
                 _rs1: MintDBWbounded = self.gpr[decoded["15:19"]]
                 rs2 = self.gpr[decoded["20:24"]]
@@ -260,33 +274,42 @@ class Core:
                 s5_10 = InstructionDecoder.gimme(instruction, 25, 30)
                 s12 = InstructionDecoder.gimme(instruction, 31, 31)
 
-                recons = MintDBWbounded(((s12 << 12) + (s11 << 11) +
-                                         (s5_10 << 5) + s1_4) << 1, 12)
+                recons = MintDBWbounded((s12 << 12) | (s11 << 11) | (s5_10 << 5) |
+                                        (s1_4 << 1), 13)
 
                 fn3 = decoded["12:14"]
 
+                log(
+                    _rs1, rs2, ALU.sign(recons), recons, fn3, bin(recons.v),
+                    (recons.v ^ (1 << 12)) - (1 << 12)
+                )
+
+                jump = False
                 match fn3:
                     case 0b000:  # BEQ
-                        self.pc += ALU.sign(recons) if _rs1 == rs2 else 0
+                        jump = True if ALU.sign(_rs1) == ALU.sign(rs2) else False
 
                     case 0b001:  # BNE
-                        self.pc += ALU.sign(recons) if _rs1 != rs2 else 0
+                        jump = True if ALU.sign(_rs1) != ALU.sign(rs2) else False
 
                     case 0b010:  # BLT
-                        self.pc += ALU.sign(recons) if ALU.sign(_rs1
-                                                               ) < ALU.sign(rs2) else 0
+                        jump = True if ALU.sign(_rs1) < ALU.sign(rs2) else False
 
                     case 0b011:  # BLTU
-                        self.pc += ALU.sign(recons) if _rs1.v < rs2.v else 0
+                        jump = True if ALU.usign(_rs1) < ALU.usign(rs2) else False
 
                     case 0b011:  # BGE
-                        self.pc += ALU.sign(recons
-                                           ) if ALU.sign(_rs1) >= ALU.sign(rs2) else 0
+                        jump = True if ALU.sign(_rs1) >= ALU.sign(rs2) else False
 
                     case 0b011:  # BGEU
-                        self.pc += ALU.sign(recons) if _rs1.v >= rs2.v else 0
+                        jump = True if ALU.usign(_rs1) >= ALU.usign(rs2) else False
 
+                if jump:
+                    log("jump")
+                    self.pc += ALU.sign(recons)
             case 0b0000011:  # load
+                log("load")
+
                 rd = self.gpr[decoded["7:11"]]
                 rs1: int = ALU.usign(self.gpr[decoded["15:19"]])  # type: ignore
 
@@ -297,6 +320,8 @@ class Core:
                 rd.v = ALU.sign(MintDBWbounded(self.bus.load(rs1 + imm, fn3), XLEN))
 
             case 0b0100011:  # store
+                log("store")
+
                 rs1 = int(ALU.usign(self.gpr[decoded["15:19"]]))  # base addr
                 rs2 = self.gpr[decoded["20:24"]]  # src
 
@@ -304,7 +329,7 @@ class Core:
 
                 fn3 = decoded["12:14"]
 
-                #print(rs1, rs2, imm, fn3)
+                #log(rs1, rs2, imm, fn3)
 
                 self.bus.store(rs1 + imm, rs2.v, fn3)
 
@@ -320,6 +345,8 @@ class Core:
 #                      self.memsh.store_word(rs1 + imm, rs2.v & 0xffff_ffff)
 
             case 0b0010011:  # imm,rs1->rd
+                log("I-type")
+
                 imma = MintDBWbounded(decoded["20:31"], 12)
                 imm = ALU.sign(imma)
                 rd = self.gpr[decoded["7:11"]]
@@ -327,11 +354,11 @@ class Core:
                 fn3 = decoded["12:14"]
                 rs1 = int(self.gpr[decoded["15:19"]])
 
-                #print("immediate to rd")
-                #print(imm, imma)
+                #log("immediate to rd")
+                #log(imm, imma)
 
                 if fn3 == 0b000:
-                    #print("addi")
+                    #log("addi")
                     rd._childself(rs1 + imm)
                 elif fn3 == 0b010:
                     # slti
@@ -372,6 +399,8 @@ class Core:
                         rd.v = ALU.rshift(rs1, shamt)
 
             case 0b0110011:  # rs2,rs1->rd
+                log("rtype")
+
                 rd = self.gpr[decoded["7:11"]]
 
                 fn3 = decoded["12:14"]
@@ -382,10 +411,10 @@ class Core:
                 match fn3:
                     case 0b000:
                         if fn7 == 0b0:
-                            rd = rd._child(rs1 + rs2.v)
+                            rd._childself(rs1 + rs2.v)
 
                         if fn7 == 0b010000:
-                            rd = rd._child(rs1 - rs2.v)
+                            rd._childself(rs1 - rs2.v)
 
                     case 0b001:
                         rd._childself(rs1 << (rs2.v & 0x1f))
@@ -412,21 +441,24 @@ class Core:
                     case 111:  # and
                         rd._childself(rs1 & rs2.v)
 
+                #print(self.gpr)
+
             case 0b0001111:
                 pass  # this is a single-core single-thread system so it doesnt matter
 
-            case 0xc0ffee:
+            case 0b1110011:  # 0xc0ffee
                 fn12 = decoded["20:31"]
 
                 if fn12 == 0b0000_0000_0000:
-                    pass
+                    log("emergency")
+                    exit()
                 else:
                     pass
 
             case _:
                 raise Trap(TCause.ILLEGAL_INSTRUCTION)
 
-        #print(self.gpr)
+        #log(self.gpr)
 
         self.pc += 4
 
@@ -436,6 +468,5 @@ class Core:
         except:
             raise Trap(TCause.INSTRUCTION_ADDRESS_MISALIGNED)
 
-        #print(instruction.to_bytes(length=4, byteorder="little"))
-
+        log(instruction.to_bytes(length=4, byteorder="little"))
         return instruction

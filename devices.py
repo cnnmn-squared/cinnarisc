@@ -1,6 +1,8 @@
 import pygame
 from xlibx import Trap, TCause, XLEN
+from config import RESOLUTION, WINDOW_SIZE
 from typing import Self
+from random import randbytes
 from dataclasses import dataclass
 
 
@@ -87,9 +89,8 @@ class Display:
     class HeaderAddresses:
         connection: int
         rendermode: int
-        sizex: int
-        sizey: int
-        renderframe: int
+        flags: int
+        framebuffr: int
 
     def __init__(self, display: pygame.Surface, size: int) -> None:
         """
@@ -116,8 +117,6 @@ class Display:
 
         self.HEADERSIZE = 8  # bytes
 
-        self.DEFAULTSCR = (160, 120)
-
         self.alloc_end = size
         self.framebuffer_region = (self.HEADERSIZE, size)
 
@@ -125,27 +124,26 @@ class Display:
             raise Trap(TCause.INVALID_DEVICE_REGION)
 
         self.vram: Memory = Memory(size)  # 4c08
-        self.rcycle: int = 0
-        self.resx: int = self.DEFAULTSCR[0]
-        self.resy: int = self.DEFAULTSCR[1]
-        self.static_resy = self.resy
+        self.resx: int = RESOLUTION[0]
+        self.resy: int = RESOLUTION[1]
 
         self.rendermode: int = 0x00
 
-        self.headeraddr = self.HeaderAddresses(0, 1, 2, 4, 6)
-        # b_connection:0 b_rendermode:1 h_sizex:2(3) h_sizey:4(5) b_renderf:6 fill
+        self.haddrs = self.HeaderAddresses(0, 1, 2, 16)
 
-        self.connection_conf = False
-        self.renderf = False
+        self.vblank: bool = False
+        self.hblank: bool = False
 
-        self.horizlszm: int = self.resx * 3 if self.rendermode == 0x02 else self.resx
-        self.static_horizlszm: int = self.horizlszm
-        # (horiz)ontal l(ine) (s)i(z)e in (m)emory
+        self.clock: int = 0
+
+        self.vblanking: int = 0
+        self.hblanking: int = 0
+
+        self.pxlsize: int = 1
 
         pygame.init()
         self.parentdisplay = display
         self.screen = pygame.Surface((self.resx, self.resy))
-        self.reiter = 0
 
     @staticmethod
     def autopalette(value: int) -> tuple[int, int, int]:
@@ -163,76 +161,50 @@ class Display:
     def tick(self) -> None:
         for event in pygame.event.get():
             print(event.type)  # pygame sideeffect
-        self.connection_conf = True if self.vram.lvfab(
-            self.headeraddr.connection
-        ) == 1 else False
 
-        self.reiter += 1
-        if not self.connection_conf:
+        if self.clock == 0:
+            if self.vblanking < 16:
+                self.vram.sviab(
+                    self.haddrs.flags, self.vram.data[self.haddrs.flags] | 1
+                )
+                self.vblanking += 1
+            else:
+                self.vblanking = 0
+                self.vram.sviab(
+                    self.haddrs.flags, self.vram.data[self.haddrs.flags] & 0xfe
+                )
 
-            self.rendermode = self.vram.lvfab(self.headeraddr.rendermode)
+                self.render(self.screen)
 
-            resxc = self.vram.load_half(self.headeraddr.sizex)
-            resyc = self.vram.load_half(self.headeraddr.sizey)
-            self.resx = resxc if resxc != 0 else self.DEFAULTSCR[0]
-            self.resy = resyc if resyc != 0 else self.DEFAULTSCR[1]
-            self.horizlszm = self.resx * 3 if self.rendermode == 0x02 else self.resx
+        if self.vram.lvfab(0) != 0xff:
+            self.rendermode = self.vram.lvfab(self.haddrs.rendermode)
+            self.pxlsize = 3 if self.rendermode == 0x02 else 1
 
-            self.screen = pygame.Surface((self.resx, self.resy))
+        scrs: int = (self.resx * self.clock + self.haddrs.framebuffr) * self.pxlsize
 
-            self.parentdisplay.blit(self.NOCONNECTION, (0, 0))
+        scanline = self.vram.data[scrs:scrs + self.resx * self.pxlsize]
 
-            if self.reiter % 256 == 0:
-                self.render(self.NOCONNECTION)
-            return
-
-        self.renderf = True if self.vram.lvfab(
-            self.headeraddr.renderframe
-        ) == 1 else False
-
-        self.horizlszm = self.resx * 3 if self.rendermode == 0x02 else self.resx
-
-        secst = self.framebuffer_region[0] + self.static_horizlszm * self.rcycle
-        section: bytes = self.vram.data[secst:secst + self.horizlszm]
-        #print(section)
-
-        sfp: int = 0
-        chp: int = 0
-        slen: int = section.__len__()
-
-        while sfp < slen:
+        h = 0
+        print(self.clock, scanline)
+        while h < len(scanline):
             match self.rendermode:
                 case 0x00:
-                    # greyscale
-                    self.rm0_greysc(section[sfp], chp, self.rcycle)
-                    sfp += 1
+                    self.rm0_greysc(scanline[h], h, self.clock)
 
                 case 0x01:
-                    # palette
-                    self.rm1_pal(section[sfp], chp, self.rcycle)
-                    sfp += 1
+                    self.rm1_pal(scanline[h], h, self.clock)
 
                 case 0x02:
-                    # rgb24
-                    self.rm2_rgb24((section[sfp], section[sfp + 1], section[sfp + 2]),
-                                   chp, self.rcycle)
-                    sfp += 3
+                    segment = scanline[h:h + self.pxlsize]
+                    self.rm2_rgb24((segment[0], segment[1], segment[2]), h, self.clock)
 
-            chp += 1
+            h += self.pxlsize
 
-        self.rendermode = self.vram.lvfab(self.headeraddr.rendermode)
-
-        self.rcycle += 1
-        if self.rcycle > self.static_resy:
-            self.rcycle = 0
-
-            self.static_horizlszm = self.horizlszm  # so resolution doesnt change until full frame complete
-            self.static_resy = self.resy  # so it wont infinitely continue
-            # self.rendermode = self.vram.lvfab(self.headeraddr.rendermode)
-
-            self.screen = pygame.transform.scale(self.screen, (self.resx, self.resy))
+        self.clock += 1
+        self.clock %= self.resy
 
     def render(self, tbsc: pygame.Surface) -> None:
+        print("render", self.vram.data[16:255])
         scscr = pygame.transform.scale(tbsc, self.parentdisplay.get_size())
         self.parentdisplay.blit(scscr, (0, 0))
         pygame.display.flip()
@@ -262,8 +234,28 @@ class Display:
         self.screen.set_at((x, y), (next_3[0], next_3[1], next_3[2]))
 
 
+class Random:
+
+    @staticmethod
+    def load(size: int) -> int:
+        byte_s = randbytes(
+            1 if size == 0 else (2 if size == 1 else (4 if size == 2 else -1))
+        )
+        mus = 0
+
+        for i, byte in enumerate(byte_s):
+            mus += byte << i * 8
+
+        return mus
+
+
 class UART:
-    pass
+
+    def __init__(self) -> None:
+        pass
+
+    def transmit(self, data: int) -> None:
+        print(chr(data & 0x10ffff))
 
 
 class Bus:
@@ -271,17 +263,20 @@ class Bus:
     @dataclass
     class Device:
         region: Region
-        device: UART | Memory | Display | None
+        device: UART | Memory | Display | Random | None
 
     def __init__(self, devices: list[Device]) -> None:
         # collision scan
         regions = [device.region for device in devices]
 
-        for pregion in regions:
-            for cregion in regions:
-                if (cregion.start > pregion.start
-                        and cregion.start < pregion.end) or (cregion.end < pregion.end):
-                    print(f"failure {cregion} {pregion}")
+        # pregion end > cregion start
+        # pregion start < cregion end
+        for i, pregion in enumerate(regions):
+            for j, cregion in enumerate(regions):
+                if i == j:
+                    continue
+                if (pregion.end > cregion.start) and (pregion.start < cregion.end):
+                    raise Exception(f"region collision between: {cregion} {pregion}")
 
         self.devices = devices
 
@@ -302,8 +297,8 @@ class Bus:
             case Memory():
                 load_type = information
 
-                print(load_type, addr)
-                print(condev.device.data[0x1000:0x1010])
+                #print(load_type, addr)
+                #print(condev.device.data[0x1000:0x1010])
 
                 if load_type == 0:
                     return condev.device.lvfab(addr)
@@ -317,6 +312,11 @@ class Bus:
                 elif load_type == 5:
                     return condev.device.load_half(addr) << 16
 
+            case Random():
+                randomlen = information
+
+                return condev.device.load(randomlen)
+
         raise Trap(TCause.LOAD_ACCESS_FAULT)
 
     def store(self, addr: int, value: int, information: int) -> None:
@@ -324,7 +324,7 @@ class Bus:
 
         match condev.device:
             case UART():
-                raise Trap(TCause.LOAD_ACCESS_FAULT)
+                condev.device.transmit(value)
 
             case Memory():
                 load_type = information
@@ -341,9 +341,6 @@ class Bus:
             case Display():
                 store_type = information
 
-                if (addr - condev.region.start) == condev.device.headeraddr.renderframe:
-                    condev.device.render(condev.device.screen)
-
                 if store_type == 0b000:
                     condev.device.vram.sviab(addr - condev.region.start, value)
                 elif store_type == 0b001:
@@ -352,5 +349,6 @@ class Bus:
                     condev.device.vram.store_word(addr - condev.region.start, value)
 
                 return
+
         print(condev.device)
         raise Trap(TCause.STORE_ACCESS_FAULT)
