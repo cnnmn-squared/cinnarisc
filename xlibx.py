@@ -51,9 +51,8 @@ class Trap(Exception):
 
 
 class FileProcessor:
-    DATA_SIGNATURE = b'rvdata'
-    TEXT_SIGNATURE = b'rvtext'
     FILE_HEADER = b'RV32I'
+    DATA_START = XLEN
 
     @staticmethod
     def partition(file: bytes) -> tuple[bytes, bytes]:
@@ -62,33 +61,52 @@ class FileProcessor:
         if file[0:5] != FileProcessor.FILE_HEADER:
             raise Exception("invalid file type (safety)")
 
-        # RV32I[align XLEN bytes - dsig][DATA_SIGNATURE][..data..][DATA_SIGNATURE][align XLEN - tsig][TEXT_SIGNATURE][program]
+        #! RV32I[align XLEN bytes - dsig][DATA_SIGNATURE][..data..][DATA_SIGNATURE][align XLEN - tsig][TEXT_SIGNATURE][program]
         # RV32I\xff[half, datastart][half, dataend][word, text_start]
 
-        fp: int = FileProcessor.FILE_HEADER.__len__()
+        def intfb(byts: bytes) -> int:
+            cbp: int = 0
+            out: int = 0
 
-        while file[fp:fp + FileProcessor.DATA_SIGNATURE.__len__(
-        )] != FileProcessor.DATA_SIGNATURE:
-            fp += 1
+            for byte in byts:
+                out += (byte << cbp)
 
-        fp += FileProcessor.DATA_SIGNATURE.__len__()
+                cbp += 8
 
-        assert fp % (XLEN // 8) == 0
+            return out
 
-        data: bytes = file[fp:file.index(FileProcessor.DATA_SIGNATURE, fp)]
-        print(data)
-        fp += len(data)
+        datastart = intfb(file[5:7])
+        dataend = intfb(file[7:9])
+        textstart = intfb(file[9:13])
 
-        while file[fp:fp + FileProcessor.TEXT_SIGNATURE.__len__(
-        )] != FileProcessor.TEXT_SIGNATURE:
-            fp += 1
+        return (file[datastart:dataend], file[textstart:])
 
-        fp += FileProcessor.TEXT_SIGNATURE.__len__()
-        print(fp)
+    @staticmethod
+    def newfile(data: bytes, text: bytes) -> bytes:
+        obj: bytearray = bytearray(FileProcessor.FILE_HEADER)
 
-        assert fp % (XLEN // 8) == 0
+        if data.__len__() > 0xffff - FileProcessor.DATA_START:
+            raise OverflowError("size of data has a limit of 0xffff.")
 
-        return (data, file[fp:])
+        regionst = FileProcessor.DATA_START
+        xlenbytes = XLEN // 8
 
+        obj.extend(regionst.to_bytes(2, "little"))
 
-FileProcessor.partition(b'RV32I___**rvdata76543210rvdata**rvtextbasilbasilbasilbasil')
+        data_end: int = regionst + data.__len__()
+        print(data_end)
+
+        obj.extend(data_end.to_bytes(2, "little"))
+
+        tsaligned: int = data_end + (xlenbytes - (data_end % xlenbytes))
+        print(tsaligned)
+
+        obj.extend(tsaligned.to_bytes(4, "little"))
+
+        obj.extend([0 for _ in range(regionst - obj.__len__())])
+        obj.extend(data)
+
+        obj.extend([0 for _ in range(tsaligned - data_end)])
+        obj.extend(text)
+
+        return obj
