@@ -5,6 +5,7 @@ from xlibx import Trap, TCause, XLEN
 DEBUG = False
 IALIGN: int = 32
 RESET_VECTOR = 0x00001000
+CLOCK_SPEED = 60  # hz
 
 DECODEVALS: TypeAlias = dict[Literal["opcode", "7:11", "12:14", "15:19", "20:24",
                                      "25:31", "12:31", "20:31"], int]
@@ -175,6 +176,12 @@ class InstructionDecoder:
 
 
 class Core:
+
+    def dump(self) -> None:
+        rdumpread: str = "\n".join(f"{k} : {hex(int(v))}" for k, v in self.gpr.items())
+        print(f"register dump: {rdumpread}\n")
+        print("-" * 40, end="\n\n")  # throwback
+        print(self.bus.devices[0].device.data[:256])
 
     def __init__(self, bus: Bus) -> None:
         self.gpr: dict[int, MintDBWbounded] = {
@@ -450,7 +457,11 @@ class Core:
                 fn12 = decoded["20:31"]
 
                 if fn12 == 0b0000_0000_0000:
-                    log("emergency")
+                    print("execution passed to debugger")
+
+                    self.dump()
+                    #print(f"first 256 ram values: {self.bus.load()}")
+
                     exit()
                 else:
                     pass

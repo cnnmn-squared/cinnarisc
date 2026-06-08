@@ -83,7 +83,7 @@ class Display:
 
         return newsur
 
-    NOCONNECTION: pygame.Surface = rwi_to_surface(open("nocon.rwi", "rb").read())
+    # NOCONNECTION: pygame.Surface = rwi_to_surface(open("nocon.rwi", "rb").read())
 
     @dataclass
     class HeaderAddresses:
@@ -255,7 +255,7 @@ class UART:
         pass
 
     def transmit(self, data: int) -> None:
-        print(chr(data & 0x10ffff))
+        print(chr(data & 0x10ffff), end="", flush=True)
 
 
 class Bus:
@@ -325,6 +325,7 @@ class Bus:
         match condev.device:
             case UART():
                 condev.device.transmit(value)
+                return
 
             case Memory():
                 load_type = information
@@ -351,4 +352,5 @@ class Bus:
                 return
 
         print(condev.device)
+        print(hex(addr))
         raise Trap(TCause.STORE_ACCESS_FAULT)
