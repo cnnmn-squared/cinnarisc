@@ -5,3 +5,6 @@ testfiles
 .flake8
 .style.yapf
 video.o
+rel
+.vscode
+dump.dump

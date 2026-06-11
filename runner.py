@@ -1,11 +1,16 @@
-from devices import Region, Bus, UART, Memory
-from xlibx import Trap, TCause, FileProcessor
+from devices import Region, Bus, UART, Memory, Display
+from xlibx import Trap, FileProcessor  # , TCause
 from machine import Core, RESET_VECTOR, CLOCK_SPEED
-from config import WINDOW_SIZE
-import pygame
+# from config import WINDOW_SIZE
+import os
+
+os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = 'yellow'
+import pygame  # noqa: E402
 
 file: bytes = open("test.rv", "rb").read()
 data, text = FileProcessor.partition(file)
+
+screen: pygame.Surface = pygame.display.set_mode((480, 360))
 
 
 def load_text(text: bytes, bus: Bus) -> None:
@@ -23,14 +28,14 @@ def load_data(data: bytes, bus: Bus, zero: int = 0) -> None:
 
 
 def main(data: bytes, text: bytes) -> None:
-
-    # devices/machine
     memory: Memory = Memory(2**20)
     uart: UART = UART()
+    display: Display = Display(screen, 0xAC10)
 
     devices: list[Bus.Device] = [
         Bus.Device(Region(0x00000, 0x0ffff), memory),
-        Bus.Device(Region(0x10000, 0x10010), uart)
+        Bus.Device(Region(0x10000, 0x10010), uart),
+        Bus.Device(Region(0x11000, 0x1BC10), display),
     ]
 
     bus = Bus(devices)
@@ -46,7 +51,7 @@ def main(data: bytes, text: bytes) -> None:
 
     while True:
         try:
-            dt = clock.tick(CLOCK_SPEED)
+            clock.tick(CLOCK_SPEED)
 
             try:
                 processor.step()
@@ -55,10 +60,14 @@ def main(data: bytes, text: bytes) -> None:
                 processor.dump()
                 exit(f"trap: {tcode}")
 
+            # display.vram.sviab(100, 255)
+            # bus.store(0x11000 + 128, 255, 0x00)
+            display.tick()
+
         except KeyboardInterrupt:
             print()
             processor.dump()
-            exit(f"keyboard interrupt")
+            exit("keyboard interrupt")
 
         cycle += 1
 

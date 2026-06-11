@@ -61,7 +61,8 @@ class FileProcessor:
         if file[0:5] != FileProcessor.FILE_HEADER:
             raise Exception("invalid file type (safety)")
 
-        #! RV32I[align XLEN bytes - dsig][DATA_SIGNATURE][..data..][DATA_SIGNATURE][align XLEN - tsig][TEXT_SIGNATURE][program]
+        # ! RV32I[align XLEN bytes - dsig][DATA_SIGNATURE][..data..][DATA_SIGNATURE][align XLEN - tsig][TEXT_SIGNATURE]
+        # ! [program]
         # RV32I\xff[half, datastart][half, dataend][word, text_start]
 
         def intfb(byts: bytes) -> int:
@@ -94,12 +95,12 @@ class FileProcessor:
         obj.extend(regionst.to_bytes(2, "little"))
 
         data_end: int = regionst + data.__len__()
-        print(data_end)
+        # print(data_end)
 
         obj.extend(data_end.to_bytes(2, "little"))
 
         tsaligned: int = data_end + (xlenbytes - (data_end % xlenbytes))
-        print(tsaligned)
+        # print(tsaligned)
 
         obj.extend(tsaligned.to_bytes(4, "little"))
 
@@ -108,5 +109,9 @@ class FileProcessor:
 
         obj.extend([0 for _ in range(tsaligned - data_end)])
         obj.extend(text)
+        """
+RV32I[rstlo][rsthi][dendlo][dendhi][tsal0][tsal1][tsal2][tsal3]
+[padding to len 32][...data...][more padding until textstart][text]
+"""
 
         return obj

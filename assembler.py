@@ -1,53 +1,43 @@
 # mypy: disable-error-code="no-redef"
 
-from dataclasses import dataclass
-import argparse
 from xlibx import FileProcessor
 
-parser = argparse.ArgumentParser(
-    prog="rv32i assembler",
-    description="assembles rv32i instructions into riscv machine code.",
-)
+DEBUG: bool = False
 
-parser.add_argument("source")
-parser.add_argument("destination")
-
-cla = parser.parse_args()
-
-inpt = open(cla.source, "r").read()
-
-opcode_matching: dict[tuple[str, ...] | str, int] = {
+OPCODES: dict[tuple[str, ...] | str, int] = {
     ("lui"): 0b0110111,
     ("auipc"): 0b0010111,
-    ("jal"): 0b1101111,
-    ("jalr"): 0b1100111,
+    ("jal", "jail"): 0b1101111,
+    ("jalr", "jallr"): 0b1100111,
     ("beq", "bne", "blt", "bge", "bltu", "bgeu"): 0b1100011,
     ("lb", "lh", "lw", "lbu", "lhu"): 0b0000011,
     ("sb", "sh", "sw"): 0b0100011,
-    ("addi", "slti", "sltiu", "xori", "ori", "andi", "srli", "slli", "srai"): 0b0010011,
-    ("add", "sub", "sll", "slt", "sltu", "xor", "srl", "sra", "or", "and"): 0b0110011,
+    ("addi", "slti", "sltiu", "xori", "ori", "andi", "srli", "slli", "srai"):
+    0b0010011,
+    ("add", "sub", "sll", "slt", "sltu", "xor", "srl", "sra", "or", "and"):
+    0b0110011,
     ("fence", "fence.tso", "pause"): 0b0001111,
     ("ebreak", "ecall"): 0b1110011
 }
 
-fn3_matching: dict[tuple[str, ...], int] = {(
-    "jalr", "beq", "lb", "sb", "addi", "add", "sub", "fence", "fence.tso", "pause", "ecall", "ebreak"
-):
-                                                0b000,
-                                            ("bne", "lh", "sh", "slli", "sll"):
-                                                0b001,
-                                            ("lw", "sw", "slti", "slt"):
-                                                0b010,
-                                            ("sltiu", "sltu"):
-                                                0b011,
-                                            ("blt", "lbu", "xori", "xor"):
-                                                0b100,
-                                            ("bge", "lhu", "srli", "srai", "srl", "sr"):
-                                                0b101,
-                                            ("bltu", "ori"):
-                                                0b110,
-                                            ("bgeu", "andi", "and"):
-                                                0b111}
+FN3: dict[tuple[str, ...], int] = {
+    ("jalr", "beq", "lb", "sb", "addi", "add", "sub", "fence", "fence.tso", "pause", "ecall", "ebreak"):
+    0b000,
+    ("bne", "lh", "sh", "slli", "sll"):
+    0b001,
+    ("lw", "sw", "slti", "slt"):
+    0b010,
+    ("sltiu", "sltu"):
+    0b011,
+    ("blt", "lbu", "xori", "xor"):
+    0b100,
+    ("bge", "lhu", "srli", "srai", "srl", "sr"):
+    0b101,
+    ("bltu", "ori"):
+    0b110,
+    ("bgeu", "andi", "and"):
+    0b111
+}
 
 REGISTER_XNAMES = {
     "zero": 0,
@@ -85,9 +75,16 @@ REGISTER_XNAMES = {
     "t6": 31,
 }
 
+SIMPLE_PSUEDO_INSTRUCTIONS: dict[str, list[str]] = {
+    "call": ["jal ra, {}"],
+    "ret": ["jalr zero, ra, 0"]
+}
+
 REGISTER_TNAMES = [f"x{i}" for i in range(32)]
 
-print(REGISTER_TNAMES)
+
+def log(*values: object) -> None:
+    print(" ".join([str(v) for v in values])) if DEBUG else None
 
 
 def getreg(name: str) -> int:
@@ -120,7 +117,7 @@ def precache_labels(instructions: list[str]) -> dict[str, int]:
 
     for instr in instructions:
         if instr.endswith(":"):
-            cache[instr.removesuffix(':')] = tinsa - 4
+            cache[instr.removesuffix(':')] = tinsa  # -4
             continue
 
         tinsa += 4
@@ -132,7 +129,7 @@ def intfdhbo(imm: str) -> int:
     prefix = imm[:2]
     strimm = imm[2:]
 
-    print(prefix, strimm)
+    log(prefix, strimm)
     match prefix:
         case "0x":
             return int(strimm, 16)
@@ -154,8 +151,13 @@ def remove_comments(instructions: list[str]) -> list[str]:
     return a
 
 
-def intfrv(a: str, varl: dict[str, int]) -> int:
+def intfrv(a: str, varl: dict[str, int], label_cache: dict[str, int],
+           cinsta: int) -> int:
+    # ! adding offsets of labels into this is so wrong but i dont want to rewrite the dynwriter just for it.
     try:
+        if a in label_cache.keys():
+            return label_cache[a] - cinsta - 4
+
         return intfdhbo(a)
     except ValueError:
         if a not in varl.keys():
@@ -164,9 +166,23 @@ def intfrv(a: str, varl: dict[str, int]) -> int:
         return varl[a]
 
 
-def assemble_instructions(
-    instructions: list[str], labels: dict[str, int], data: dict[str, int]
-) -> bytes:
+# def psuedo_pass(instructions: list[str]) -> list[str]:
+#     new_set: list[str] = []
+#     for instruction in instructions:
+#         op, *args = instruction.split()
+#
+#         match op:
+#             case "call":
+#                 # call becomes jal ra, SYMBOL
+#                 new_set.append(f"jal ra, {args[0]}")
+#
+#             case "ret":
+#                 # ret becomes jalr zero, ra, 0  (jump back to ra and dont save)
+#                 new_set.append("jalr zero, ra, 0")
+
+
+def assemble_instructions(instructions: list[str], labels: dict[str, int],
+                          data: dict[str, int]) -> bytes:
     full: bytearray = bytearray()
     cinsta = 0
     for line, instr in enumerate(instructions):
@@ -184,12 +200,13 @@ def assemble_instructions(
             operator = instr
 
         opcode: int = 0
-        for k, v in opcode_matching.items():
+        for k, v in OPCODES.items():
             if operator in k:
                 opcode = v
 
         if opcode == 0:
-            raise Exception(f"Assembler: Invalid Instruction {instr} on line {line}")
+            raise Exception(
+                f"Assembler: Invalid Instruction {instr} on line {line}")
 
         encoded: int = opcode
         match opcode:
@@ -198,7 +215,7 @@ def assemble_instructions(
 
                 rd: int = getreg(rdn)
 
-                imm20 = intfrv(imms, data) & 0xfffff
+                imm20 = intfrv(imms, data, labels, cinsta) & 0xfffff
 
                 encoded |= (rd << 7)
                 encoded |= (imm20 << 12)
@@ -208,28 +225,46 @@ def assemble_instructions(
 
                 rd: int = getreg(rdn)
 
-                imm20 = intfrv(imms, data) & 0xfffff
+                imm20 = intfrv(imms, data, labels, cinsta) & 0xfffff
 
                 encoded |= (rd << 7)
                 encoded |= (imm20 << 12)
 
         fn3: int
-        for k, v in fn3_matching.items():
+        for k, v in FN3.items():
             if operator in k:
                 fn3 = v
 
         match opcode:
             case 0b1101111:  # jal
                 # ignore for now
-                pass
+
+                rdn, j, *_ = args
+
+                rd: int = getreg(rdn)
+                tolabel: int = (intfrv(j, data, labels, cinsta))
+
+                # imm[20|10:1|11|19:12]
+                j12_19 = (tolabel >> 12) & 0xff
+                j11 = (tolabel >> 11) & 0x1
+                j1_10 = (tolabel >> 1) & 0x3ff
+                j20 = (tolabel >> 20) & 0x1
+
+                encoded |= (rd << 7)
+
+                encoded |= (j12_19 << 12)
+                encoded |= (j11 << 20)
+                encoded |= (j1_10 << 21)
+                encoded |= (j20 << 31)
 
             case 0b1100111:  # jalr
+                # log(args)
                 rdn, rs1n, offsets, *_ = args
 
                 rd: int = getreg(rdn)
                 rs1: int = getreg(rs1n)
 
-                imm12 = intfrv(offsets, data) & 0xfff
+                imm12 = intfrv(offsets, data, labels, cinsta) & 0xfff
 
                 encoded |= (rd << 7)
                 encoded |= (fn3 << 12)
@@ -249,15 +284,15 @@ def assemble_instructions(
                 # if offset == 0:
                 #     offset = findlabel(target, instructions[line:])
 
-                print("####", offset)
+                log("####", offset)
 
                 s12: int = (offset >> 12) & 0x1
                 s11: int = (offset >> 11) & 0x1
                 s5_10: int = (offset >> 5) & 0x3f
                 s1_4: int = (offset >> 1) & 0xf
 
-                print(s1_4, s5_10, s11, s12)
-                print((s12 << 12) | (s11 << 11) | (s5_10 << 5) | (s1_4 << 1))
+                log(s1_4, s5_10, s11, s12)
+                log((s12 << 12) | (s11 << 11) | (s5_10 << 5) | (s1_4 << 1))
 
                 encoded |= (s11 << 7)
                 encoded |= (s1_4 << 8)
@@ -273,7 +308,7 @@ def assemble_instructions(
                 rd: int = getreg(rdn)
                 rs1: int = getreg(rs1n)
 
-                imm12 = intfrv(offsets, data) & 0xfff
+                imm12 = intfrv(offsets, data, labels, cinsta) & 0xfff
 
                 encoded |= (rd << 7)
                 encoded |= (rs1 << 15)
@@ -296,7 +331,7 @@ def assemble_instructions(
 
                 rs1: int = getreg(rs1n)
                 rs2: int = getreg(rs2n)
-                imm: int = intfrv(offsetty, data)
+                imm: int = intfrv(offsetty, data, labels, cinsta)
 
                 encoded |= ((imm & 0b11111) << 7)
                 encoded |= (rs1 << 15)
@@ -310,7 +345,7 @@ def assemble_instructions(
                 rd: int = getreg(rdn)
                 rs1: int = getreg(rs1n)
 
-                imm12 = intfrv(offsets, data) & 0xfff
+                imm12 = intfrv(offsets, data, labels, cinsta) & 0xfff
 
                 encoded |= (rd << 7)
                 encoded |= (rs1 << 15)
@@ -346,7 +381,8 @@ def assemble_instructions(
     return full
 
 
-def interpret_datregion(data_text: list[str]) -> tuple[dict[str, int], bytearray]:
+def interpret_datregion(
+        data_text: list[str]) -> tuple[dict[str, int], bytearray]:
     # ({name: value}, region)
     # text is stored as {name: location(offset)}
     data_encoded: bytearray = bytearray()
@@ -357,7 +393,7 @@ def interpret_datregion(data_text: list[str]) -> tuple[dict[str, int], bytearray
     for var in data_text:
         var = var.strip(" ")
         # partitioned into name: type = value
-        print("var", var)
+        log("var", var)
         if not var:
             continue
 
@@ -373,32 +409,29 @@ def interpret_datregion(data_text: list[str]) -> tuple[dict[str, int], bytearray
                 vali = intfdhbo(value)
                 if vali > 0xff:
                     raise Exception(
-                        f"value {vali} is too large for type {typeof} ({var})"
-                    )
+                        f"value {vali} is too large for type {typeof} ({var})")
 
                 nv[name] = data_ptr
 
-                data_ptr += 4
-                data_encoded.extend([vali, 0, 0, 0])
+                data_ptr += 1
+                data_encoded.extend([vali])
 
             case "half":
                 vali = intfdhbo(value)
                 if vali > 0xffff:
                     raise Exception(
-                        f"value {vali} is too large for type {typeof} ({var})"
-                    )
+                        f"value {vali} is too large for type {typeof} ({var})")
 
                 nv[name] = data_ptr
 
-                data_ptr += 4
-                data_encoded.extend(vali.to_bytes(4, "little"))
+                data_ptr += 2
+                data_encoded.extend(vali.to_bytes(2, "little"))
 
             case "word":
                 vali = intfdhbo(value)
                 if vali > 0xffff_ffff:
                     raise Exception(
-                        f"value {vali} is too large for type {typeof} ({var})"
-                    )
+                        f"value {vali} is too large for type {typeof} ({var})")
 
                 nv[name] = data_ptr
 
@@ -412,17 +445,18 @@ def interpret_datregion(data_text: list[str]) -> tuple[dict[str, int], bytearray
 
                 length = len(string[1])
                 rem = (4 - (length % 4)) % 4
-                print(rem)
+                log(rem)
                 data_ptr += length + rem
 
-                print(string, data_ptr)
+                log(string, data_ptr)
                 data_encoded.extend([ord(ch) for ch in string[1]])
                 data_encoded.extend([0 for i in range(rem)])
 
-                print(data_encoded)
+                log(data_encoded)
 
             case "macro":
-                # $name in the instructions will replace with the value given, not the address of the value, useful for macros.
+                # $name in the instructions will replace with the value given,
+                # not the address of the value, useful for macros.
                 # integer only,
                 # usage:
                 # name: macro = int (data region)
@@ -440,43 +474,35 @@ def clean(input: list[str]) -> list[str]:
     return [line for line in inpt if line]
 
 
-file = inpt.splitlines()
+def assemble(file: str) -> bytes:
+    lines = file.splitlines()
 
-data_region: list[str] = file[file.index(".data"):file.index(".text")]
-data_region = clean(data_region)
-inst_region: list[str] = file[file.index(".text"):]
+    data_region: list[str] = lines[lines.index(".data"):lines.index(".text")]
+    data_region = clean(data_region)
+    inst_region: list[str] = lines[lines.index(".text"):]
 
-instructions = remove_comments(inst_region)
-instructions = [ins.replace(",", "") for ins in instructions]
-instructions = [ins.strip(" ") for ins in instructions]
-instructions = [ins for ins in instructions if ins != ""]
+    instructions = remove_comments(inst_region)
+    instructions = [ins.replace(",", "") for ins in instructions]
+    instructions = [ins.strip(" ") for ins in instructions]
+    instructions = [ins for ins in instructions if ins != ""]
 
-labelcache = precache_labels(instructions)
+    labelcache = precache_labels(instructions)
 
-print(f"labels: {labelcache}")
+    # data: pointers for all the data when the text section is assembled
+    # data_encoded: the data section to be attached to the file
+    data, data_encoded = interpret_datregion(data_region[1:])
 
-ufriend: list[str] = []
-i = 0
-for ins in instructions:
-    ufriend.append(
-        f"[0x{hex(i).removeprefix('0x').rjust(4, '0')}] {'  ' if ins.endswith(':') else ''}{ins} {'->' if ins.endswith(':') else ''}"
-    )
+    text = assemble_instructions(instructions[1:], labelcache, data)
 
-    if not ins.endswith(":"):
-        i += 4
+    return FileProcessor.newfile(data_encoded, text)
 
-print("program:\n", '\n'.join(ufriend), sep="")
 
-data, data_encoded = interpret_datregion(data_region[1:])
-text = assemble_instructions(instructions[1:], labelcache, data)
-
-print(text)
-print(labelcache)
-print(data, data_encoded)
-
-writable: bytes = FileProcessor.newfile(data_encoded, text)
-
-print(writable)
-
-with open(cla.destination, "wb") as img:
-    img.write(writable)
+# ufriend: list[str] = []
+# i = 0
+# for ins in instructions:
+#     ufriend.append(f"[0x{hex(i).removeprefix('0x').rjust(4, '0')}] \
+# {'  ' if not ins.endswith(':') else ''}{ins} {'->' if ins.endswith(':') else ''}"
+#                   )
+#
+#   if not ins.endswith(":"):
+#        i += 4

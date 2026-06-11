@@ -1,7 +1,7 @@
 import pygame
 from xlibx import Trap, TCause, XLEN
-from config import RESOLUTION, WINDOW_SIZE
-from typing import Self
+from config import RESOLUTION  # , WINDOW_SIZE
+# from typing import Self
 from random import randbytes
 from dataclasses import dataclass
 
@@ -16,7 +16,8 @@ class Memory:
 
     def __init__(self, size: int) -> None:
         if size > 2**XLEN:
-            raise Exception(f"`size` is too large! limit is 2^{XLEN}, size({size})")
+            raise Exception(
+                f"`size` is too large! limit is 2^{XLEN}, size({size})")
 
         self.data = bytearray(size)
 
@@ -45,8 +46,9 @@ class Memory:
         if address % 4 != 0:
             raise Trap(TCause.LOAD_ADDRESS_MISALIGNED)
 
-        return (self.data[address + 3] << 24) + (self.data[
-            address + 2] << 16) + (self.data[address + 1] << 8) + self.data[address]
+        return (self.data[address + 3] << 24) + (
+            self.data[address + 2] << 16) + (
+                self.data[address + 1] << 8) + self.data[address]
 
     def store_half(self, address: int, value: int) -> None:
         if address % 2 != 0:
@@ -77,9 +79,10 @@ class Display:
             if grey:
                 newsur.set_at((i % 160, i // 160), (pxl, pxl, pxl))
             else:
-                newsur.set_at((i % 160, i // 160), ((pxl & 0b111) * 255 // 7,
-                                                    ((pxl >> 3) & 0b111) * 255 // 7,
-                                                    ((pxl >> 6) & 0b11) * 255 // 3))
+                newsur.set_at(
+                    (i % 160, i // 160),
+                    ((pxl & 0b111) * 255 // 7, ((pxl >> 3) & 0b111) * 255 // 7,
+                     ((pxl >> 6) & 0b11) * 255 // 3))
 
         return newsur
 
@@ -98,7 +101,8 @@ class Display:
         Display does not use a bus interface, magic addresses are used.
         `[header(enable)][header(rendermode)][header(sizex_lo)][header(sizex_hi)][header(sizey_lo)][header(sizey_hi)][header(renderframe)][FILLER][framedata...]`
 
-        if `regend` is too low to fit all the data, or exceeds memory size, a trap of `INVALID_DEVICE_REGION` will be raised
+        if `regend` is too low to fit all the data, or exceeds memory size,
+            a trap of `INVALID_DEVICE_REGION` will be raised
 
         rendermodes:
             `0x00` greyscale (8-bit)
@@ -124,6 +128,7 @@ class Display:
             raise Trap(TCause.INVALID_DEVICE_REGION)
 
         self.vram: Memory = Memory(size)  # 4c08
+        # self.vram.data = bytearray([255] * 0x4c08)
         self.resx: int = RESOLUTION[0]
         self.resy: int = RESOLUTION[1]
 
@@ -159,33 +164,35 @@ class Display:
         return (rval, gval, bval)
 
     def tick(self) -> None:
-        for event in pygame.event.get():
-            print(event.type)  # pygame sideeffect
+        # for event in pygame.event.get():
+        #     print(event.type)  # pygame sideeffect
+
+        pygame.event.clear()
 
         if self.clock == 0:
             if self.vblanking < 16:
-                self.vram.sviab(
-                    self.haddrs.flags, self.vram.data[self.haddrs.flags] | 1
-                )
+                self.vram.sviab(self.haddrs.flags,
+                                self.vram.data[self.haddrs.flags] | 1)
                 self.vblanking += 1
             else:
                 self.vblanking = 0
-                self.vram.sviab(
-                    self.haddrs.flags, self.vram.data[self.haddrs.flags] & 0xfe
-                )
+                self.vram.sviab(self.haddrs.flags,
+                                self.vram.data[self.haddrs.flags] & 0xfe)
 
-                self.render(self.screen)
+        self.render(self.screen)
 
         if self.vram.lvfab(0) != 0xff:
             self.rendermode = self.vram.lvfab(self.haddrs.rendermode)
             self.pxlsize = 3 if self.rendermode == 0x02 else 1
+            # print("connection")
 
-        scrs: int = (self.resx * self.clock + self.haddrs.framebuffr) * self.pxlsize
+        scrs: int = (self.resx * self.clock +
+                     self.haddrs.framebuffr) * self.pxlsize
 
         scanline = self.vram.data[scrs:scrs + self.resx * self.pxlsize]
 
         h = 0
-        print(self.clock, scanline)
+        # print(self.clock, self.vblanking, scanline[0:8], "         ", end="\r")
         while h < len(scanline):
             match self.rendermode:
                 case 0x00:
@@ -196,7 +203,8 @@ class Display:
 
                 case 0x02:
                     segment = scanline[h:h + self.pxlsize]
-                    self.rm2_rgb24((segment[0], segment[1], segment[2]), h, self.clock)
+                    self.rm2_rgb24((segment[0], segment[1], segment[2]), h,
+                                   self.clock)
 
             h += self.pxlsize
 
@@ -204,7 +212,7 @@ class Display:
         self.clock %= self.resy
 
     def render(self, tbsc: pygame.Surface) -> None:
-        print("render", self.vram.data[16:255])
+        # print("render", self.vram.data[16:255])
         scscr = pygame.transform.scale(tbsc, self.parentdisplay.get_size())
         self.parentdisplay.blit(scscr, (0, 0))
         pygame.display.flip()
@@ -238,9 +246,8 @@ class Random:
 
     @staticmethod
     def load(size: int) -> int:
-        byte_s = randbytes(
-            1 if size == 0 else (2 if size == 1 else (4 if size == 2 else -1))
-        )
+        byte_s = randbytes(1 if size == 0 else (2 if size == 1 else (
+            4 if size == 2 else -1)))
         mus = 0
 
         for i, byte in enumerate(byte_s):
@@ -275,12 +282,15 @@ class Bus:
             for j, cregion in enumerate(regions):
                 if i == j:
                     continue
-                if (pregion.end > cregion.start) and (pregion.start < cregion.end):
-                    raise Exception(f"region collision between: {cregion} {pregion}")
+                if (pregion.end > cregion.start) and (pregion.start
+                                                      < cregion.end):
+                    raise Exception(
+                        f"region collision between: {cregion} {pregion}")
 
         self.devices = devices
 
     def _fdra(self, addr: int) -> Device:
+        # find device region (from) address
         for device in self.devices:
             if addr >= device.region.start and addr <= device.region.end:
                 return device
@@ -297,8 +307,8 @@ class Bus:
             case Memory():
                 load_type = information
 
-                #print(load_type, addr)
-                #print(condev.device.data[0x1000:0x1010])
+                # print(load_type, addr)
+                # print(condev.device.data[0x1000:0x1010])
 
                 if load_type == 0:
                     return condev.device.lvfab(addr)
@@ -345,9 +355,11 @@ class Bus:
                 if store_type == 0b000:
                     condev.device.vram.sviab(addr - condev.region.start, value)
                 elif store_type == 0b001:
-                    condev.device.vram.store_half(addr - condev.region.start, value)
+                    condev.device.vram.store_half(addr - condev.region.start,
+                                                  value)
                 elif store_type == 0b010:
-                    condev.device.vram.store_word(addr - condev.region.start, value)
+                    condev.device.vram.store_word(addr - condev.region.start,
+                                                  value)
 
                 return
 
