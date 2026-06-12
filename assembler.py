@@ -83,6 +83,17 @@ SIMPLE_PSUEDO_INSTRUCTIONS: dict[str, list[str]] = {
 REGISTER_TNAMES = [f"x{i}" for i in range(32)]
 
 
+class Instruction:
+
+    def __init__(self, assemble: str, true: str, lineno: int) -> None:
+        self.assemble: str = assemble  # what the assembler sees
+        self.true: str = true  # what the user sees
+        self.lineno: int = lineno  # the lineno in the file
+
+    def __repr__(self) -> str:
+        return f"[instruction '{self.assemble}' ('{self.true}' @ {self.lineno})]"
+
+
 def log(*values: object) -> None:
     print(" ".join([str(v) for v in values])) if DEBUG else None
 
@@ -111,13 +122,13 @@ def findlabel(target: str, nextinstrs: list[str]) -> int:
     raise Exception(f"Couldn't find label: {target}")
 
 
-def precache_labels(instructions: list[str]) -> dict[str, int]:
+def precache_labels(instructions: list[Instruction]) -> dict[str, int]:
     cache: dict[str, int] = {}
     tinsa: int = 0
 
     for instr in instructions:
-        if instr.endswith(":"):
-            cache[instr.removesuffix(':')] = tinsa  # -4
+        if instr.assemble.endswith(":"):
+            cache[instr.assemble.removesuffix(':')] = tinsa  # -4
             continue
 
         tinsa += 4
@@ -181,23 +192,41 @@ def intfrv(a: str, varl: dict[str, int], label_cache: dict[str, int],
 #                 new_set.append("jalr zero, ra, 0")
 
 
-def assemble_instructions(instructions: list[str], labels: dict[str, int],
-                          data: dict[str, int]) -> bytes:
+class AssembleError:
+
+    def __init__(self, code: int, lineno: int, linet: str, accomp: str,
+                 hint: str) -> None:
+        # code: errorcode
+        # lineno: line number, eg. 189
+        # linet: line text, eg. addi x1, x0, 512
+        # accomp: more on the error, eg. addi expects an immediate, not a register
+        self.code = code
+        self.lineno = lineno
+        self.linet = linet
+        self.message = accomp
+        self.hint = hint
+
+
+def assemble_instructions(
+        instructions: list[Instruction], labels: dict[str, int],
+        data: dict[str, int]) -> tuple[bytes, list[AssembleError]]:
+    errors: list[AssembleError] = []
     full: bytearray = bytearray()
     cinsta = 0
     for line, instr in enumerate(instructions):
-        if not instr:
+        ainstr: str = instr.assemble
+        if not ainstr:
             continue
 
-        if instr.endswith(":"):
+        if ainstr.endswith(":"):
             continue
 
-        if instr not in ("ebreak", "ecall"):
+        if ainstr not in ("ebreak", "ecall"):
 
-            operator, *args = instr.split()
+            operator, *args = ainstr.split()
 
         else:
-            operator = instr
+            operator = ainstr
 
         opcode: int = 0
         for k, v in OPCODES.items():
@@ -205,8 +234,11 @@ def assemble_instructions(instructions: list[str], labels: dict[str, int],
                 opcode = v
 
         if opcode == 0:
-            raise Exception(
-                f"Assembler: Invalid Instruction {instr} on line {line}")
+            # raise Exception(
+            #     f"Assembler: Invalid Instruction {ainstr} on line {line}")
+            errors.append(
+                AssembleError(0x0, instr.lineno, instr.true,
+                              "Invalid Instruction", ""))
 
         encoded: int = opcode
         match opcode:
@@ -238,40 +270,51 @@ def assemble_instructions(instructions: list[str], labels: dict[str, int],
         match opcode:
             case 0b1101111:  # jal
                 # ignore for now
+                try:
 
-                rdn, j, *_ = args
+                    rdn, j, *_ = args
 
-                rd: int = getreg(rdn)
-                tolabel: int = (intfrv(j, data, labels, cinsta))
+                    rd: int = getreg(rdn)
+                    tolabel: int = (intfrv(j, data, labels, cinsta))
 
-                # imm[20|10:1|11|19:12]
-                j12_19 = (tolabel >> 12) & 0xff
-                j11 = (tolabel >> 11) & 0x1
-                j1_10 = (tolabel >> 1) & 0x3ff
-                j20 = (tolabel >> 20) & 0x1
+                    # imm[20|10:1|11|19:12]
+                    j12_19 = (tolabel >> 12) & 0xff
+                    j11 = (tolabel >> 11) & 0x1
+                    j1_10 = (tolabel >> 1) & 0x3ff
+                    j20 = (tolabel >> 20) & 0x1
 
-                encoded |= (rd << 7)
+                    encoded |= (rd << 7)
 
-                encoded |= (j12_19 << 12)
-                encoded |= (j11 << 20)
-                encoded |= (j1_10 << 21)
-                encoded |= (j20 << 31)
+                    encoded |= (j12_19 << 12)
+                    encoded |= (j11 << 20)
+                    encoded |= (j1_10 << 21)
+                    encoded |= (j20 << 31)
+
+                except ValueError:
+                    errors.append(
+                        AssembleError(1, instr.lineno, instr.true,
+                                      "expected 2 operands but only got one.",
+                                      "did you remember to add `ra`?"))
 
             case 0b1100111:  # jalr
                 # log(args)
-                rdn, rs1n, offsets, *_ = args
+                try:
+                    rdn, rs1n, offsets, *_ = args
 
-                rd: int = getreg(rdn)
-                rs1: int = getreg(rs1n)
+                    rd: int = getreg(rdn)
+                    rs1: int = getreg(rs1n)
 
-                imm12 = intfrv(offsets, data, labels, cinsta) & 0xfff
+                    imm12 = intfrv(offsets, data, labels, cinsta) & 0xfff
 
-                encoded |= (rd << 7)
-                encoded |= (fn3 << 12)
-                encoded |= (rs1 << 15)
-                encoded |= (imm12 << 20)
+                    encoded |= (rd << 7)
+                    encoded |= (fn3 << 12)
+                    encoded |= (rs1 << 15)
+                    encoded |= (imm12 << 20)
+                except LookupError as e:
+                    errors.append(
+                        AssembleError(999, instr.lineno, instr.true, e, ""))
 
-            # general instr
+            # general ainstr
 
             case 0b1100011:  # branch
                 rs1n, rs2n, target, *_ = args
@@ -378,7 +421,7 @@ def assemble_instructions(instructions: list[str], labels: dict[str, int],
 
         cinsta += 4
 
-    return full
+    return full, errors
 
 
 def interpret_datregion(
@@ -389,6 +432,11 @@ def interpret_datregion(
     nv: dict[str, int] = {}
 
     data_ptr: int = 0
+
+    def align(what: int, how_much: int, de: bytearray) -> int:
+        rem = (how_much - (what % how_much)) % how_much
+        de.extend([0] * rem)
+        return what + rem
 
     for var in data_text:
         var = var.strip(" ")
@@ -417,6 +465,7 @@ def interpret_datregion(
                 data_encoded.extend([vali])
 
             case "half":
+                data_ptr = align(data_ptr, 2, data_encoded)
                 vali = intfdhbo(value)
                 if vali > 0xffff:
                     raise Exception(
@@ -428,6 +477,7 @@ def interpret_datregion(
                 data_encoded.extend(vali.to_bytes(2, "little"))
 
             case "word":
+                data_ptr = align(data_ptr, 4, data_encoded)
                 vali = intfdhbo(value)
                 if vali > 0xffff_ffff:
                     raise Exception(
@@ -460,10 +510,20 @@ def interpret_datregion(
                 # integer only,
                 # usage:
                 # name: macro = int (data region)
-                # inst __, __, $name (instruction region)
+                # inst __, __, name (instruction region)
 
                 vali = intfdhbo(value)
                 nv[name] = vali
+
+            case "import":
+                # import a bytes file into data
+                path = value
+                with open(path, "rb") as file:
+                    data: bytes = file.read()
+                    rem = (4 - (data.__len__() % 4)) % 4
+                    data_ptr += data.__len__() + rem
+                    data_encoded.extend(data)
+                    data_encoded.extend([0 for _ in range(rem)])
 
     return (nv, data_encoded)
 
@@ -474,17 +534,35 @@ def clean(input: list[str]) -> list[str]:
     return [line for line in inpt if line]
 
 
-def assemble(file: str) -> bytes:
+def remove_comment(input: str) -> str:
+    return input.partition("#")[0]
+
+
+def assemble(file: str) -> tuple[bytes, list[AssembleError]]:
     lines = file.splitlines()
 
     data_region: list[str] = lines[lines.index(".data"):lines.index(".text")]
+    data_file_lines: int = len(data_region)
     data_region = clean(data_region)
     inst_region: list[str] = lines[lines.index(".text"):]
 
-    instructions = remove_comments(inst_region)
-    instructions = [ins.replace(",", "") for ins in instructions]
-    instructions = [ins.strip(" ") for ins in instructions]
-    instructions = [ins for ins in instructions if ins != ""]
+    instructions: list[Instruction] = []
+
+    lineno = data_file_lines - 1
+
+    for ins in inst_region:
+        newins: str = ins.replace(",", " ")
+        newins = remove_comment(newins)
+        newins = newins.strip(" ")
+        lineno += 1
+
+        instructions.append(Instruction(newins, ins.strip(" "), lineno))
+
+    instructions = [
+        instruction for instruction in instructions
+        if instruction.assemble != ""
+    ]
+    # print(instructions)
 
     labelcache = precache_labels(instructions)
 
@@ -492,9 +570,10 @@ def assemble(file: str) -> bytes:
     # data_encoded: the data section to be attached to the file
     data, data_encoded = interpret_datregion(data_region[1:])
 
-    text = assemble_instructions(instructions[1:], labelcache, data)
+    text, errors = assemble_instructions(instructions[1:], labelcache,
+                                         data)  # text region is included
 
-    return FileProcessor.newfile(data_encoded, text)
+    return FileProcessor.newfile(data_encoded, text), errors
 
 
 # ufriend: list[str] = []

@@ -36,11 +36,40 @@ print(
     f"    {colored('Assembling', 'green', attrs=['bold'])} {glob.glob(cla.source)[0].split('/')[-1]} \
 ({glob.glob(cla.source)[0]})")
 s: float = time()
-try:
-    fileout: bytes = assembler.assemble(file)
-except Exception as e:
-    print(f"Error encountered while assembling!\n{e}")
-    exit()
+if True:
+    fileout, errors = assembler.assemble(file)
+    for error in errors:
+        print(
+            colored(f"error[E{'0' * (3 - len(str(error.code)))}{error.code}]",
+                    "red",
+                    attrs=["bold"]) +
+            colored(f": {error.message}", attrs=["bold"]))
+        print(
+            colored(" --> ", "cyan", attrs=["bold"]) +
+            glob.glob(cla.source)[0])
+        print(
+            colored(
+                f"{' ' * (len(str(error.lineno)) + 1)}|\n{error.lineno} |     ",
+                "cyan",
+                attrs=["bold"]) + error.linet.strip(" ") +
+            colored(f"\n{' ' * (len(str(error.lineno)) + 1)}|",
+                    "cyan",
+                    attrs=["bold"]),
+            colored(f"\n{' ' * (len(str(error.lineno)) + 2)}{error.hint}",
+                    attrs=["bold"]))
+        print()
+
+    if errors.__len__() > 0:
+        print(
+            colored("error", "red", attrs=["bold"]) + colored(
+                f": aborting due to previous error{'s' if len(errors) > 1 else ''}.",
+                attrs=["bold"]))
+
+        exit()
+
+# except Exception as e:
+#     print(f"Error encountered while assembling!\n{e}")
+#    exit()
 
 print(
     f"    {colored(f'Finished', 'green', attrs=['bold'])} in {round(time()-s, 2)}s"
