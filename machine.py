@@ -1,6 +1,8 @@
+# mypy: disable-error-code="no-redef"
+
 from typing import Self, Literal, TypeAlias
 from devices import Bus
-from xlibx import Trap, TCause, XLEN
+from risclib import Trap, TCause, XLEN
 
 DEBUG = False
 TRACE_MAX_LENGTH = 64
@@ -42,7 +44,7 @@ class MintDBWbounded:
         return self._child(self.v * self._coerce(other))
 
     def __truediv__(self, other: Self | int) -> Self:
-        return self._child(self.v / self._coerce(other))
+        return self._child(self.v // self._coerce(other))
 
     def __iadd__(self, other: Self | int) -> Self:
         self.v += self._coerce(other)

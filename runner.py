@@ -1,5 +1,5 @@
 from devices import Region, Bus, UART, Memory, Display
-from xlibx import Trap, FileProcessor  # , TCause
+from risclib import Trap, FileProcessor  # , TCause
 from machine import Core, RESET_VECTOR, CLOCK_SPEED
 # from config import WINDOW_SIZE
 import os
@@ -28,14 +28,16 @@ def load_data(data: bytes, bus: Bus, zero: int = 0) -> None:
 
 
 def main(data: bytes, text: bytes) -> None:
-    memory: Memory = Memory(2**20)
+    program_memory: Memory = Memory(2**16)
     uart: UART = UART()
     display: Display = Display(screen, 0xAC10)
+    ram: Memory = Memory(2**16)
 
     devices: list[Bus.Device] = [
-        Bus.Device(Region(0x00000, 0x0ffff), memory),
-        Bus.Device(Region(0x10000, 0x10010), uart),
-        Bus.Device(Region(0x11000, 0x1BC10), display),
+        Bus.Device(Region(0x00000000, 0x0000ffff), program_memory),
+        Bus.Device(Region(0x00010000, 0x00010010), uart),
+        Bus.Device(Region(0x00011000, 0x0001BC10), display),
+        Bus.Device(Region(0x00020000, 0x0002ffff), ram),
     ]
 
     bus = Bus(devices)
@@ -60,8 +62,6 @@ def main(data: bytes, text: bytes) -> None:
                 processor.dump()
                 exit(f"trap: {tcode}")
 
-            # display.vram.sviab(100, 255)
-            # bus.store(0x11000 + 128, 255, 0x00)
             display.tick()
 
         except KeyboardInterrupt:

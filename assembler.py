@@ -1,6 +1,8 @@
 # mypy: disable-error-code="no-redef"
 
-from xlibx import FileProcessor
+from risclib import FileProcessor
+from typing import NamedTuple, Literal
+from dataclasses import dataclass
 
 DEBUG: bool = False
 
@@ -83,15 +85,53 @@ SIMPLE_PSUEDO_INSTRUCTIONS: dict[str, list[str]] = {
 REGISTER_TNAMES = [f"x{i}" for i in range(32)]
 
 
+class CriticalError(BaseException):
+
+    def __init__(self, *args):
+        super().__init__(*args)
+
+
+class GlobalSymbol:
+
+    def __init__(self, symbol: str, at: int, size: int):
+        self.symbol = symbol
+        self.at = at
+        self.size = size
+
+
+class Line(NamedTuple):
+    text: str
+    lineno: int
+
+
 class Instruction:
 
-    def __init__(self, assemble: str, true: str, lineno: int) -> None:
-        self.assemble: str = assemble  # what the assembler sees
-        self.true: str = true  # what the user sees
-        self.lineno: int = lineno  # the lineno in the file
+    def __init__(self, line: Line, assembly: str) -> None:
+        self.assemble: str = assembly  # what the assembler sees
+        self.line = line  # what the user sees
 
     def __repr__(self) -> str:
-        return f"[instruction '{self.assemble}' ('{self.true}' @ {self.lineno})]"
+        return f"[instruction '{self.assemble}' ('{self.line.text}' @ {self.line.lineno})]"
+
+
+class Error:
+
+    def __init__(self, line: Line, etype: Literal["warn", "error"], code: int,
+                 message: str, hint: str) -> None:
+        self.code = code
+        self.line = line
+        self.type = etype
+        self.message = message
+        self.hint = hint
+
+
+@dataclass
+class Assembly:
+    # symbols: dict[str, GlobalSymbol]
+    origin: int
+
+    instructions: list[Instruction]
+    data_region: bytearray
 
 
 def log(*values: object) -> None:
@@ -136,7 +176,7 @@ def precache_labels(instructions: list[Instruction]) -> dict[str, int]:
     return cache
 
 
-def intfdhbo(imm: str) -> int:
+def int_from_any(imm: str) -> int:
     prefix = imm[:2]
     strimm = imm[2:]
 
@@ -165,55 +205,31 @@ def remove_comments(instructions: list[str]) -> list[str]:
 def intfrv(a: str, varl: dict[str, int], label_cache: dict[str, int],
            cinsta: int) -> int:
     # ! adding offsets of labels into this is so wrong but i dont want to rewrite the dynwriter just for it.
-    try:
-        if a in label_cache.keys():
-            return label_cache[a] - cinsta - 4
+    if not a:
+        raise Exception("")
 
-        return intfdhbo(a)
-    except ValueError:
-        if a not in varl.keys():
-            raise NameError(f"{a} is not defined in the data section")
+    if a in label_cache.keys():
+        return label_cache[a] - cinsta - 4
 
+    if a in varl.keys():
         return varl[a]
 
-
-# def psuedo_pass(instructions: list[str]) -> list[str]:
-#     new_set: list[str] = []
-#     for instruction in instructions:
-#         op, *args = instruction.split()
-#
-#         match op:
-#             case "call":
-#                 # call becomes jal ra, SYMBOL
-#                 new_set.append(f"jal ra, {args[0]}")
-#
-#             case "ret":
-#                 # ret becomes jalr zero, ra, 0  (jump back to ra and dont save)
-#                 new_set.append("jalr zero, ra, 0")
+    # it is the callers job to enforce that a is integer
+    return int_from_any(a)
 
 
-class AssembleError:
+class AssembleError(Error):
 
-    def __init__(self, code: int, lineno: int, linet: str, accomp: str,
-                 hint: str) -> None:
-        # code: errorcode
-        # lineno: line number, eg. 189
-        # linet: line text, eg. addi x1, x0, 512
-        # accomp: more on the error, eg. addi expects an immediate, not a register
-        self.code = code
-        self.lineno = lineno
-        self.linet = linet
-        self.message = accomp
-        self.hint = hint
+    def __init__(self, line, etype, code, message, hint) -> None:
+        super().__init__(line, etype, code, message, hint)
 
 
 def assemble_instructions(
-        instructions: list[Instruction], labels: dict[str, int],
-        data: dict[str, int]) -> tuple[bytes, list[AssembleError]]:
-    errors: list[AssembleError] = []
+        instructions: list[Instruction]) -> tuple[bytes, list[Error]]:
+    errors: list[Error] = []
     full: bytearray = bytearray()
     cinsta = 0
-    for line, instr in enumerate(instructions):
+    for instr in instructions:
         ainstr: str = instr.assemble
         if not ainstr:
             continue
@@ -234,11 +250,8 @@ def assemble_instructions(
                 opcode = v
 
         if opcode == 0:
-            # raise Exception(
-            #     f"Assembler: Invalid Instruction {ainstr} on line {line}")
             errors.append(
-                AssembleError(0x0, instr.lineno, instr.true,
-                              "Invalid Instruction", ""))
+                AssembleError(instr, "error", 0x0, "Invalid Instruction", ""))
 
         encoded: int = opcode
         match opcode:
@@ -247,7 +260,7 @@ def assemble_instructions(
 
                 rd: int = getreg(rdn)
 
-                imm20 = intfrv(imms, data, labels, cinsta) & 0xfffff
+                imm20 = int_from_any(imms) & 0xfffff
 
                 encoded |= (rd << 7)
                 encoded |= (imm20 << 12)
@@ -257,7 +270,7 @@ def assemble_instructions(
 
                 rd: int = getreg(rdn)
 
-                imm20 = intfrv(imms, data, labels, cinsta) & 0xfffff
+                imm20 = int_from_any(imms) & 0xfffff
 
                 encoded |= (rd << 7)
                 encoded |= (imm20 << 12)
@@ -269,19 +282,18 @@ def assemble_instructions(
 
         match opcode:
             case 0b1101111:  # jal
-                # ignore for now
                 try:
 
                     rdn, j, *_ = args
 
                     rd: int = getreg(rdn)
-                    tolabel: int = (intfrv(j, data, labels, cinsta))
+                    offset: int = int_from_any(j)
 
                     # imm[20|10:1|11|19:12]
-                    j12_19 = (tolabel >> 12) & 0xff
-                    j11 = (tolabel >> 11) & 0x1
-                    j1_10 = (tolabel >> 1) & 0x3ff
-                    j20 = (tolabel >> 20) & 0x1
+                    j12_19 = (offset >> 12) & 0xff
+                    j11 = (offset >> 11) & 0x1
+                    j1_10 = (offset >> 1) & 0x3ff
+                    j20 = (offset >> 20) & 0x1
 
                     encoded |= (rd << 7)
 
@@ -292,7 +304,7 @@ def assemble_instructions(
 
                 except ValueError:
                     errors.append(
-                        AssembleError(1, instr.lineno, instr.true,
+                        AssembleError(1, instr.line.lineno, instr.line.text,
                                       "expected 2 operands but only got one.",
                                       "did you remember to add `ra`?"))
 
@@ -304,7 +316,7 @@ def assemble_instructions(
                     rd: int = getreg(rdn)
                     rs1: int = getreg(rs1n)
 
-                    imm12 = intfrv(offsets, data, labels, cinsta) & 0xfff
+                    imm12 = int_from_any(offsets) & 0xfff
 
                     encoded |= (rd << 7)
                     encoded |= (fn3 << 12)
@@ -312,22 +324,18 @@ def assemble_instructions(
                     encoded |= (imm12 << 20)
                 except LookupError as e:
                     errors.append(
-                        AssembleError(999, instr.lineno, instr.true, e, ""))
+                        AssembleError(999, instr.line.lineno, instr.line.text,
+                                      e, ""))
 
             # general ainstr
 
             case 0b1100011:  # branch
-                rs1n, rs2n, target, *_ = args
+                rs1n, rs2n, offsets, *_ = args
 
                 rs1: int = getreg(rs1n)
                 rs2: int = getreg(rs2n)
 
-                offset: int = labels[target] - cinsta - 4
-
-                # if offset == 0:
-                #     offset = findlabel(target, instructions[line:])
-
-                log("####", offset)
+                offset = int_from_any(offsets)
 
                 s12: int = (offset >> 12) & 0x1
                 s11: int = (offset >> 11) & 0x1
@@ -351,7 +359,7 @@ def assemble_instructions(
                 rd: int = getreg(rdn)
                 rs1: int = getreg(rs1n)
 
-                imm12 = intfrv(offsets, data, labels, cinsta) & 0xfff
+                imm12 = int_from_any(offsets) & 0xfff
 
                 encoded |= (rd << 7)
                 encoded |= (rs1 << 15)
@@ -374,7 +382,7 @@ def assemble_instructions(
 
                 rs1: int = getreg(rs1n)
                 rs2: int = getreg(rs2n)
-                imm: int = intfrv(offsetty, data, labels, cinsta)
+                imm: int = int_from_any(offsetty)
 
                 encoded |= ((imm & 0b11111) << 7)
                 encoded |= (rs1 << 15)
@@ -388,7 +396,7 @@ def assemble_instructions(
                 rd: int = getreg(rdn)
                 rs1: int = getreg(rs1n)
 
-                imm12 = intfrv(offsets, data, labels, cinsta) & 0xfff
+                imm12 = int_from_any(offsets) & 0xfff
 
                 encoded |= (rd << 7)
                 encoded |= (rs1 << 15)
@@ -424,12 +432,12 @@ def assemble_instructions(
     return full, errors
 
 
-def interpret_datregion(
-        data_text: list[str]) -> tuple[dict[str, int], bytearray]:
+def process_data_section(
+        lines: list[Line]) -> tuple[dict[str, GlobalSymbol], bytearray]:
     # ({name: value}, region)
     # text is stored as {name: location(offset)}
     data_encoded: bytearray = bytearray()
-    nv: dict[str, int] = {}
+    symbolmap: dict[str, GlobalSymbol] = {}
 
     data_ptr: int = 0
 
@@ -438,8 +446,8 @@ def interpret_datregion(
         de.extend([0] * rem)
         return what + rem
 
-    for var in data_text:
-        var = var.strip(" ")
+    for line in lines:
+        var: str = line.text.strip(" ")
         # partitioned into name: type = value
         log("var", var)
         if not var:
@@ -454,55 +462,48 @@ def interpret_datregion(
 
         match typeof:
             case "byte":
-                vali = intfdhbo(value)
+                vali = int_from_any(value)
                 if vali > 0xff:
                     raise Exception(
                         f"value {vali} is too large for type {typeof} ({var})")
 
-                nv[name] = data_ptr
+                symbolmap[name] = GlobalSymbol(name, data_ptr, 1)
 
                 data_ptr += 1
                 data_encoded.extend([vali])
 
             case "half":
                 data_ptr = align(data_ptr, 2, data_encoded)
-                vali = intfdhbo(value)
+                vali = int_from_any(value)
                 if vali > 0xffff:
                     raise Exception(
                         f"value {vali} is too large for type {typeof} ({var})")
 
-                nv[name] = data_ptr
+                symbolmap[name] = GlobalSymbol(name, data_ptr, 2)
 
                 data_ptr += 2
                 data_encoded.extend(vali.to_bytes(2, "little"))
 
             case "word":
                 data_ptr = align(data_ptr, 4, data_encoded)
-                vali = intfdhbo(value)
+                vali = int_from_any(value)
                 if vali > 0xffff_ffff:
                     raise Exception(
                         f"value {vali} is too large for type {typeof} ({var})")
 
-                nv[name] = data_ptr
+                symbolmap[name] = GlobalSymbol(name, data_ptr, 4)
 
                 data_ptr += 4
                 data_encoded.extend(vali.to_bytes(4, "little"))
 
             case "string":
-                string = value.split("\"")
+                string = value.strip('"')
 
-                nv[name] = data_ptr
+                length = len(string)
 
-                length = len(string[1])
-                rem = (4 - (length % 4)) % 4
-                log(rem)
-                data_ptr += length + rem
+                symbolmap[name] = GlobalSymbol(name, data_ptr, length)
 
-                log(string, data_ptr)
-                data_encoded.extend([ord(ch) for ch in string[1]])
-                data_encoded.extend([0 for i in range(rem)])
-
-                log(data_encoded)
+                data_encoded.extend([ord(ch) for ch in string])
 
             case "macro":
                 # $name in the instructions will replace with the value given,
@@ -512,8 +513,8 @@ def interpret_datregion(
                 # name: macro = int (data region)
                 # inst __, __, name (instruction region)
 
-                vali = intfdhbo(value)
-                nv[name] = vali
+                vali = int_from_any(value)
+                symbolmap[name] = GlobalSymbol(name, vali, 0)
 
             case "import":
                 # import a bytes file into data
@@ -525,7 +526,7 @@ def interpret_datregion(
                     data_encoded.extend(data)
                     data_encoded.extend([0 for _ in range(rem)])
 
-    return (nv, data_encoded)
+    return (symbolmap, data_encoded)
 
 
 def clean(input: list[str]) -> list[str]:
@@ -538,50 +539,181 @@ def remove_comment(input: str) -> str:
     return input.partition("#")[0]
 
 
-def assemble(file: str) -> tuple[bytes, list[AssembleError]]:
-    lines = file.splitlines()
+def int_to_lui_addi_pair(register: str, number: int) -> list[str]:
+    # simple optimisation
+    pair: list[str] = []
+    if number > 0xfff:  # cannot fit in addi
+        pair.append(f"lui {register} {int(number) >> 12}")
 
-    data_region: list[str] = lines[lines.index(".data"):lines.index(".text")]
-    data_file_lines: int = len(data_region)
-    data_region = clean(data_region)
-    inst_region: list[str] = lines[lines.index(".text"):]
+    if number & 0xfff != 0:  # number already finished by lui
+        pair.append(f"addi {register} {register} {int(number) & 0xfff}")
+
+    return pair
+
+
+def preprocess(lines: list[str]) -> tuple[Assembly, list[Error]]:
+    origin: int = 0x0
+    metalines: list[Line] = []
+    issues: list[Error] = []
+    for lineno, prelline in enumerate(lines):
+        metalines.append(Line(prelline.strip(" "), lineno + 1))
+
+    # * Segment into sections
+
+    sections: dict[str, list[Line]] = {}
+    within_section: str = ""
+
+    for line in metalines:
+        text, lineno = line
+        # process directives
+        if not text.startswith("."):
+            if within_section != "":
+                sections[within_section].append(line)
+            continue
+
+        iden, *other = text.split()
+        match iden:
+            case ".section":
+                section_type, *_ = other
+                sections[section_type] = []
+                within_section = section_type
+
+            case ".org":
+                sorigin, *_ = other
+                origin = int(sorigin)
+
+    data_section: list[Line]
+    text_section: list[Line]
+
+    if ".data" not in sections.keys():
+        issues.append(
+            Error(metalines[0], "warn", 0, "no data section in file!",
+                  "add `.section .data` to the top of your file."))
+    else:
+        data_section = sections[".data"]
+
+    if origin == 0:
+        issues.append(
+            Error(metalines[0], "warn", 0,
+                  "no origin directive in file! Guessed `0x1000`",
+                  "add `.org [origin]` to the top of your file."))
+
+        origin = 0x1000
+
+    if ".text" not in sections.keys():
+        issues.append(
+            Error(metalines[0], "error", 1, "a .text section is required!",
+                  "add `.section .text` before code."))
+
+        raise CriticalError("yo")
+
+    text_section = sections[".text"]
+
+    symboltable: dict[str, GlobalSymbol] = {}
+    encoded: bytearray = bytearray()
+
+    if data_section:
+        symboltable, encoded = process_data_section(data_section)
+
+    # * Labels (1)
+    # scan .text into a labeltable
+    labeltable: dict[str, int] = {}  # addrs as mcode addr excluding resetv
+
+    machloc: int = origin
+    for line in text_section:
+        if not line.text:
+            continue
+
+        if line.text.endswith(":"):
+            labeltable[line.text.removesuffix(":")] = machloc
+            continue
+
+        machloc += 4
+
+    # print(labeltable)
+
+    # * Switch all lines to instructions & remove ,
+    text_section = [line for line in text_section if line.text != ""]
+    ntext: list[Line] = []
+    for line in text_section:
+        ntext.append(Line(line.text.strip(" "), line.lineno))
+
+    text_section = ntext
 
     instructions: list[Instruction] = []
+    for line in text_section:
+        instructions.append(Instruction(line, line.text.replace(",", "")))
 
-    lineno = data_file_lines - 1
-
-    for ins in inst_region:
-        newins: str = ins.replace(",", " ")
-        newins = remove_comment(newins)
-        newins = newins.strip(" ")
-        lineno += 1
-
-        instructions.append(Instruction(newins, ins.strip(" "), lineno))
-
-    instructions = [
-        instruction for instruction in instructions
-        if instruction.assemble != ""
-    ]
     # print(instructions)
+    # * Labels (2)
+    # convert all the references to labels into offsets
+    # references beginning with * are absolute addresses (good to pair with li)
 
-    labelcache = precache_labels(instructions)
+    machloc: int = origin
+    for instruction in instructions:
+        parts = instruction.assemble.split(" ")
+        newparts: list[str] = []
 
-    # data: pointers for all the data when the text section is assembled
-    # data_encoded: the data section to be attached to the file
-    data, data_encoded = interpret_datregion(data_region[1:])
+        for part in parts:
+            if part.startswith("*"):
+                if part.removeprefix("*") in labeltable.keys():
+                    part = str(labeltable[part.removeprefix("*")])
 
-    text, errors = assemble_instructions(instructions[1:], labelcache,
-                                         data)  # text region is included
+            if part in labeltable.keys():
+                part = str(labeltable[part] - machloc - 4)
 
-    return FileProcessor.newfile(data_encoded, text), errors
+            newparts.append(part)
+
+        # print(newparts)
+        instruction.assemble = " ".join(newparts)
+
+        machloc += 4
+
+    # * Resolve constants & symbols
+
+    if symboltable != {}:
+        for instruction in instructions:
+            parts = instruction.assemble.split(" ")
+            newparts: list[str] = []
+
+            for part in parts:
+                if part in symboltable.keys():
+                    part = str(symboltable[part].at)
+
+                newparts.append(part)
+
+            # print(newparts)
+            instruction.assemble = " ".join(newparts)
+
+            machloc += 4
+
+    # * Make pseudoinstructions true
+
+    ninstructions: list[Instruction] = []
+
+    for instr in instructions:
+        op, *rest = instr.assemble.split()
+
+        match op:
+            case "li":
+                rd, val, *_ = rest
+                pair = int_to_lui_addi_pair(rd, int_from_any(val))
+                ninstructions.extend(
+                    [Instruction(instr.line, ass) for ass in pair])
+
+            case _:
+                ninstructions.append(Instruction(instr.line, instr.assemble))
+
+    instructions = ninstructions
+
+    return Assembly(origin, instructions, encoded), issues
 
 
-# ufriend: list[str] = []
-# i = 0
-# for ins in instructions:
-#     ufriend.append(f"[0x{hex(i).removeprefix('0x').rjust(4, '0')}] \
-# {'  ' if not ins.endswith(':') else ''}{ins} {'->' if ins.endswith(':') else ''}"
-#                   )
-#
-#   if not ins.endswith(":"):
-#        i += 4
+def assemble(file: str) -> tuple[bytes, list[Error]]:
+    lines = file.splitlines()
+
+    assembly, errors = preprocess(lines)
+
+    mcode, errors = assemble_instructions(assembly.instructions)
+
+    return FileProcessor.newfile(assembly.data_region, mcode), errors

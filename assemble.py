@@ -49,13 +49,13 @@ if True:
             glob.glob(cla.source)[0])
         print(
             colored(
-                f"{' ' * (len(str(error.lineno)) + 1)}|\n{error.lineno} |     ",
+                f"{' ' * (len(str(error.line.lineno)) + 1)}|\n{error.line.lineno} |     ",
                 "cyan",
-                attrs=["bold"]) + error.linet.strip(" ") +
-            colored(f"\n{' ' * (len(str(error.lineno)) + 1)}|",
+                attrs=["bold"]) + error.line.text.strip(" ") +
+            colored(f"\n{' ' * (len(str(error.line.lineno)) + 1)}|",
                     "cyan",
                     attrs=["bold"]),
-            colored(f"\n{' ' * (len(str(error.lineno)) + 2)}{error.hint}",
+            colored(f"\n{' ' * (len(str(error.line.lineno)) + 2)}{error.hint}",
                     attrs=["bold"]))
         print()
 

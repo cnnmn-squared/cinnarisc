@@ -1,5 +1,5 @@
 import pygame
-from xlibx import Trap, TCause, XLEN
+from risclib import Trap, TCause, XLEN
 from config import RESOLUTION  # , WINDOW_SIZE
 # from typing import Self
 from random import randbytes
@@ -318,8 +318,10 @@ class Bus:
                     return condev.device.load_word(addr)
 
                 elif load_type == 4:
+                    raise NotImplementedError("not implement")
                     return condev.device.lvfab(addr) << 8
                 elif load_type == 5:
+                    raise NotImplementedError("not implement")
                     return condev.device.load_half(addr) << 16
 
             case Random():
