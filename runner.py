@@ -7,11 +7,6 @@ import os
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = 'yellow'
 import pygame  # noqa: E402
 
-file: bytes = open("test.rv", "rb").read()
-data, text = FileProcessor.partition(file)
-
-screen: pygame.Surface = pygame.display.set_mode((480, 360))
-
 
 def load_text(text: bytes, bus: Bus) -> None:
     for i, byte in enumerate(text):
@@ -27,7 +22,11 @@ def load_data(data: bytes, bus: Bus, zero: int = 0) -> None:
     return
 
 
-def main(data: bytes, text: bytes) -> None:
+def run(src: str) -> None:
+    file: bytes = open(src, "rb").read()
+    data, text = FileProcessor.partition(file)
+
+    screen: pygame.Surface = pygame.display.set_mode((480, 360))
     program_memory: Memory = Memory(2**16)
     uart: UART = UART()
     display: Display = Display(screen, 0xAC10)
@@ -70,6 +69,3 @@ def main(data: bytes, text: bytes) -> None:
             exit("keyboard interrupt")
 
         cycle += 1
-
-
-main(data, text)

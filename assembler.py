@@ -251,7 +251,8 @@ def assemble_instructions(
 
         if opcode == 0:
             errors.append(
-                AssembleError(instr, "error", 0x0, "Invalid Instruction", ""))
+                AssembleError(instr.line, "error", 0x0, "Invalid Instruction",
+                              ""))
 
         encoded: int = opcode
         match opcode:
@@ -505,7 +506,7 @@ def process_data_section(
 
                 data_encoded.extend([ord(ch) for ch in string])
 
-            case "macro":
+            case "const":
                 # $name in the instructions will replace with the value given,
                 # not the address of the value, useful for macros.
                 # integer only,
@@ -558,6 +559,16 @@ def preprocess(lines: list[str]) -> tuple[Assembly, list[Error]]:
     for lineno, prelline in enumerate(lines):
         metalines.append(Line(prelline.strip(" "), lineno + 1))
 
+    # * Remove comments
+    metalines = [line for line in metalines if not line.text.startswith("#")]
+
+    for i, line in enumerate(metalines):
+        metalines[i] = Line(
+            "".join(line.text.partition("#")[0].strip(" ")),
+            line.lineno)  # breaks the "true" line text (who cares)
+
+        # print("".join(line.text.partition("#")[0].strip(" ")))
+
     # * Segment into sections
 
     sections: dict[str, list[Line]] = {}
@@ -580,10 +591,10 @@ def preprocess(lines: list[str]) -> tuple[Assembly, list[Error]]:
 
             case ".org":
                 sorigin, *_ = other
-                origin = int(sorigin)
+                origin = int_from_any(sorigin)
 
-    data_section: list[Line]
-    text_section: list[Line]
+    data_section: list[Line] = []
+    text_section: list[Line] = []
 
     if ".data" not in sections.keys():
         issues.append(
@@ -644,7 +655,13 @@ def preprocess(lines: list[str]) -> tuple[Assembly, list[Error]]:
     for line in text_section:
         instructions.append(Instruction(line, line.text.replace(",", "")))
 
-    # print(instructions)
+    # * remove all labels to fix the labeljoiner (keeping the labels messes with the math)
+
+    instructions = [
+        instruction for instruction in instructions
+        if not instruction.assemble.endswith(":")
+    ]
+
     # * Labels (2)
     # convert all the references to labels into offsets
     # references beginning with * are absolute addresses (good to pair with li)
@@ -660,7 +677,7 @@ def preprocess(lines: list[str]) -> tuple[Assembly, list[Error]]:
                     part = str(labeltable[part.removeprefix("*")])
 
             if part in labeltable.keys():
-                part = str(labeltable[part] - machloc - 4)
+                part = str(labeltable[part] - machloc)
 
             newparts.append(part)
 
@@ -671,6 +688,7 @@ def preprocess(lines: list[str]) -> tuple[Assembly, list[Error]]:
 
     # * Resolve constants & symbols
 
+    # print(symboltable)
     if symboltable != {}:
         for instruction in instructions:
             parts = instruction.assemble.split(" ")
@@ -709,11 +727,11 @@ def preprocess(lines: list[str]) -> tuple[Assembly, list[Error]]:
     return Assembly(origin, instructions, encoded), issues
 
 
-def assemble(file: str) -> tuple[bytes, list[Error]]:
+def assemble(file: str) -> tuple[bytes, list[Error], Assembly]:
     lines = file.splitlines()
 
     assembly, errors = preprocess(lines)
 
     mcode, errors = assemble_instructions(assembly.instructions)
 
-    return FileProcessor.newfile(assembly.data_region, mcode), errors
+    return FileProcessor.newfile(assembly.data_region, mcode), errors, assembly
