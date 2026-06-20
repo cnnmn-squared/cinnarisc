@@ -85,7 +85,7 @@ def build(src: str, filename: str) -> None:
             file.write("\n".join(instr.assemble
                                  for instr in assembly.instructions))
 
-    writefile(obj, ".".join(filename.split(".")[:-1]) + ".obj")
+    writefile(obj, ".".join(src.split(".")[:-1]) + ".obj")
 
 
 def run(src: str) -> None:

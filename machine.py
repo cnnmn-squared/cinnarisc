@@ -9,7 +9,6 @@ TRACE_MAX_LENGTH = 64
 
 IALIGN: int = 32
 RESET_VECTOR = 0x00001000
-CLOCK_SPEED = 60  # hz
 
 DECODEVALS: TypeAlias = dict[Literal["opcode", "7:11", "12:14", "15:19",
                                      "20:24", "25:31", "12:31", "20:31"], int]
@@ -578,6 +577,16 @@ class Core:
 
                             print("execution halted: ram dumped")
                             self.dump()
+
+                        case 0x4:
+                            print("execution halted: bus trace")
+                            print(self.bus.trace)
+
+                        case 0x5:
+                            pass
+
+                        case 0x6:
+                            pass
 
                         case _:
                             self.dump()

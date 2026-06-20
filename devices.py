@@ -1,7 +1,8 @@
 import pygame
 from risclib import Trap, TCause, XLEN
-from config import RESOLUTION  # , WINDOW_SIZE
+from config import RESOLUTION, CLOCK_SPEED  # , WINDOW_SIZE
 # from typing import Self
+
 from random import randbytes
 from dataclasses import dataclass
 
@@ -28,10 +29,10 @@ class Memory:
     def _addrbounds(self, addr: int) -> int:
         return addr % self.data.__len__()
 
-    def lvfab(self, address: int) -> int:
+    def load_byte(self, address: int) -> int:
         return self.data[address]
 
-    def sviab(self, address: int, value: int) -> None:
+    def store_byte(self, address: int, value: int) -> None:
         if value > 0xff:
             raise Trap(TCause.STORE_ACCESS_FAULT)
         self.data[address] = value
@@ -40,7 +41,7 @@ class Memory:
         if address % 2 != 0:
             raise Trap(TCause.LOAD_ADDRESS_MISALIGNED)
 
-        return (self.lvfab(address + 1) << 8) + self.lvfab(address)
+        return (self.load_byte(address + 1) << 8) + self.load_byte(address)
 
     def load_word(self, address: int) -> int:
         if address % 4 != 0:
@@ -171,18 +172,18 @@ class Display:
 
         if self.clock == 0:
             if self.vblanking < 16:
-                self.vram.sviab(self.haddrs.flags,
-                                self.vram.data[self.haddrs.flags] | 1)
+                self.vram.store_byte(self.haddrs.flags,
+                                     self.vram.data[self.haddrs.flags] | 1)
                 self.vblanking += 1
             else:
                 self.vblanking = 0
-                self.vram.sviab(self.haddrs.flags,
-                                self.vram.data[self.haddrs.flags] & 0xfe)
+                self.vram.store_byte(self.haddrs.flags,
+                                     self.vram.data[self.haddrs.flags] & 0xfe)
 
         self.render(self.screen)
 
-        if self.vram.lvfab(0) != 0xff:
-            self.rendermode = self.vram.lvfab(self.haddrs.rendermode)
+        if self.vram.load_byte(0) != 0xff:
+            self.rendermode = self.vram.load_byte(self.haddrs.rendermode)
             self.pxlsize = 3 if self.rendermode == 0x02 else 1
             # print("connection")
 
@@ -242,6 +243,75 @@ class Display:
         self.screen.set_at((x, y), (next_3[0], next_3[1], next_3[2]))
 
 
+class VGATextBuffer:
+
+    def __init__(self, parent: pygame.Surface) -> None:
+        pygame.init()
+
+        self.owning: Memory = Memory(4000)
+        self.parent = parent
+        self.font = pygame.font.Font("resources/vga8x16.ttf", 16)
+        self.cycles_draw = CLOCK_SPEED // 60  # tries to refresh as close to 60hz as possible
+        self.cycles = 0
+
+    def drawsc(self) -> None:
+        y, x = 0, 0
+        for i in range(0, self.owning.data.__len__(), 2):
+            half = self.owning.load_half(i)
+            char = half & 0xff
+            _ = (half >> 8) & 0xff
+
+            if char == 0x00:
+                continue
+
+            fon: pygame.Surface = self.font.render(
+                bytes([char]).decode("cp437"), False, (255, 255, 255))
+
+            self.parent.blit(fon, (x * 8, y * 16))
+
+            x += 1
+
+            if x >= 80:
+                y += 1
+                x = 0
+
+        if self.cycles % self.cycles_draw == 0:
+            pygame.display.flip()
+            self.parent.fill((0, 0, 0))
+
+        self.cycles = (self.cycles + 1) % CLOCK_SPEED
+
+        return
+
+
+class Keyboard:
+
+    def __init__(self) -> None:
+        pygame.init()
+        self.expose: Memory = Memory(8)
+        self.usage: list[int] = []
+
+    def tick(self, keyvents: list[pygame.event.Event]) -> None:
+        for keyvent in keyvents:
+            if keyvent.type == pygame.KEYDOWN:
+                self.usage.append(keyvent.key)
+                self.expose.store_byte(7, 0xff)
+
+            elif keyvent.type == pygame.KEYUP:
+                self.usage.remove(keyvent.key)
+
+            if keyvent.type in [pygame.KEYDOWN, pygame.KEYUP]:
+
+                for i, k in enumerate(self.usage):
+                    print(chr(k) if k < 0x10000 else "")
+                    if k == pygame.K_BACKSPACE:
+                        self.expose.store_byte(i, 8)
+                    elif k == pygame.K_LSHIFT:
+                        pass
+                    else:
+                        self.expose.store_byte(i, ord(keyvent.unicode))
+
+
 class Random:
 
     @staticmethod
@@ -270,7 +340,7 @@ class Bus:
     @dataclass
     class Device:
         region: Region
-        device: UART | Memory | Display | Random | None
+        device: UART | Memory | Display | Random | VGATextBuffer | Keyboard | None
 
     def __init__(self, devices: list[Device]) -> None:
         # collision scan
@@ -288,6 +358,7 @@ class Bus:
                         f"region collision between: {cregion} {pregion}")
 
         self.devices = devices
+        self.trace: list[str] = []
 
     def _fdra(self, addr: int) -> Device:
         # find device region (from) address
@@ -300,6 +371,9 @@ class Bus:
     def load(self, addr: int, information: int) -> int:
         condev = self._fdra(addr)
 
+        self.trace.append(
+            (f"load({['8','16','32','16','32'][information]}) from {addr}"))
+
         match condev.device:
             case UART():
                 raise Trap(TCause.LOAD_ACCESS_FAULT)
@@ -311,7 +385,7 @@ class Bus:
                 # print(condev.device.data[0x1000:0x1010])
 
                 if load_type == 0:
-                    return condev.device.lvfab(addr)
+                    return condev.device.load_byte(addr)
                 elif load_type == 1:
                     return condev.device.load_half(addr)
                 elif load_type == 2:
@@ -319,7 +393,7 @@ class Bus:
 
                 elif load_type == 4:
                     raise NotImplementedError("not implement")
-                    return condev.device.lvfab(addr) << 8
+                    return condev.device.load_byte(addr) << 8
                 elif load_type == 5:
                     raise NotImplementedError("not implement")
                     return condev.device.load_half(addr) << 16
@@ -329,10 +403,22 @@ class Bus:
 
                 return condev.device.load(randomlen)
 
+            case Keyboard():
+                match information:
+                    case 0b000:
+                        return condev.device.expose.load_byte(
+                            addr - condev.region.start)
+
+                    case _:
+                        raise Trap(TCause.LOAD_ACCESS_FAULT)
+
         raise Trap(TCause.LOAD_ACCESS_FAULT)
 
     def store(self, addr: int, value: int, information: int) -> None:
         condev = self._fdra(addr)
+
+        self.trace.append(
+            (f"store({['8','16','32'][information]}) from {addr}"))
 
         match condev.device:
             case UART():
@@ -343,7 +429,7 @@ class Bus:
                 load_type = information
 
                 if load_type == 0b000:
-                    condev.device.sviab(addr, value & 0xff)
+                    condev.device.store_byte(addr, value & 0xff)
                 elif load_type == 0b001:
                     condev.device.store_half(addr, value & 0xffff)
                 elif load_type == 0b010:
@@ -355,7 +441,8 @@ class Bus:
                 store_type = information
 
                 if store_type == 0b000:
-                    condev.device.vram.sviab(addr - condev.region.start, value)
+                    condev.device.vram.store_byte(addr - condev.region.start,
+                                                  value)
                 elif store_type == 0b001:
                     condev.device.vram.store_half(addr - condev.region.start,
                                                   value)
@@ -365,6 +452,35 @@ class Bus:
 
                 return
 
+            case VGATextBuffer():
+                store_type = information
+                match store_type:
+                    case 0b000:
+                        condev.device.owning.store_byte(
+                            addr - condev.region.start, value)
+                    case 0b001:
+                        condev.device.owning.store_half(
+                            addr - condev.region.start, value)
+                    case 0b010:
+                        condev.device.owning.store_word(
+                            addr - condev.region.start, value)
+
+                return
+
+            case Keyboard():
+
+                match information:
+                    case 0b000:
+                        condev.device.expose.store_byte(
+                            addr - condev.region.start, value)
+
+                    case _:
+                        raise Trap(TCause.STORE_ACCESS_FAULT)
+
+                return
+                raise Trap(TCause.STORE_ACCESS_FAULT)
+
         print(condev.device)
         print(hex(addr))
+        print("AAAAAAAAAAAA")
         raise Trap(TCause.STORE_ACCESS_FAULT)
