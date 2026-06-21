@@ -4,5 +4,8 @@ __pycache__
 .style.yapf
 .vscode
 ignoreme
-riscy
 assembly
+riscy/target
+riscy/Cargo.lock
+riscy/out.obj
+riscy/src/hello_world.s
