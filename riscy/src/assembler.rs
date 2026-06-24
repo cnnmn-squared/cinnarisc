@@ -63,14 +63,20 @@ pub fn assemble(lines: Vec<String>) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>
 }
 
 fn int_from_any(sint: &str) -> i32 {
+    if sint.len() < 2 {
+        // must be decimal 1-10
+        return u32::from_str_radix(sint, 10).expect("wrong radix for decimal") as i32;
+    }
     let prefix: &str = &sint[0..2];
     let strint: &str = &sint[2..];
 
+    println!("{} ({}){}", sint, prefix, strint);
+
     match prefix {
-        "0x" => i32::from_str_radix(strint, 16).expect("wrong radix for 0x"),
-        "0b" => i32::from_str_radix(strint, 2).expect("wrong radix for 0b"),
-        "0o" => i32::from_str_radix(strint, 8).expect("wrong radix for 0o"),
-        _ => i32::from_str_radix(strint, 10).expect("wrong radix for decimal"),
+        "0x" => u32::from_str_radix(strint, 16).expect("wrong radix for 0x") as i32,
+        "0b" => u32::from_str_radix(strint, 2).expect("wrong radix for 0b") as i32,
+        "0o" => u32::from_str_radix(strint, 8).expect("wrong radix for 0o") as i32,
+        _ => u32::from_str_radix(sint, 10).expect("wrong radix for decimal") as i32,
     }
 }
 
@@ -376,14 +382,23 @@ fn process_data_section(lines: Vec<Line>) -> (HashMap<String, Symbol>, Vec<u8>) 
 
 fn int_to_lui_addi_pair(register: &str, number: i32) -> Vec<String> {
     let mut pair: Vec<String> = Vec::new();
-    if number > 0xfff {
+    let hi = (number + 0x800) >> 12;
+    let lo = number - (hi << 12);
+    println!("{} {}", hi, lo);
+    if hi != 0 {
         // cannot fit within addi
         pair.push(format!("lui {} {}", register, number >> 12))
     }
-    if number & 0xfff != 0 {
+    if lo != 0 {
         // n = 0 or n is already finished by lui
-        pair.push(format!("addi {0} {0} {1}", register, number & 0xfff))
+        if hi == 0 {
+            pair.push(format!("addi {0} x0 {1}", register, number & 0xfff)) // make sure it isnt incrementing
+        } else {
+            pair.push(format!("addi {0} {0} {1}", register, number & 0xfff))
+        }
     }
+
+    println!("[int_to_lui_addi_pair] pair {:?}; num {}", pair, number);
 
     pair
 }
@@ -577,7 +592,8 @@ fn preprocess(lines: Vec<String>) -> Result<Assembly, Box<dyn Error>> {
             }
 
             if labeltable.contains_key(part) {
-                npart = (labeltable[part] - machloc).to_string()
+                // println!("{} {} {} {}", labeltable, part, labeltable[part], machloc)
+                npart = (labeltable[part] as i32 - machloc as i32).to_string()
             }
 
             newparts.push(npart)
@@ -625,6 +641,8 @@ fn preprocess(lines: Vec<String>) -> Result<Assembly, Box<dyn Error>> {
                 let (rd, val) = (rest[0], rest[1]);
                 let pair = int_to_lui_addi_pair(rd, int_from_any(val));
 
+                println!("pair {:?}", pair);
+
                 ninstructions.extend(
                     pair.iter()
                         .map(|ass: &String| Instruction::new(ass.as_str(), instr.line.clone())),
@@ -639,6 +657,8 @@ fn preprocess(lines: Vec<String>) -> Result<Assembly, Box<dyn Error>> {
             }
         }
     }
+
+    instructions = ninstructions;
 
     //* Convert registernames to register numbers & convert all to regular int
 
@@ -690,6 +710,10 @@ fn assemble_instructions(
     // errors: list[Error] = []
     let mut full: Vec<u8> = Vec::new();
     for instr in &instructions {
+        println!(
+            "[{}] {} (as {})",
+            instr.line.lineno, instr.line.text, instr.assemble
+        );
         let ainstr: &str = &instr.assemble;
         if ainstr.is_empty() {
             continue;
@@ -733,7 +757,7 @@ fn assemble_instructions(
                 // lui
                 let (rdn, imms) = (&args[0], &args[1]);
                 let rd: u32 = u32::from_str_radix(&rdn[1..], 10)? & 0x1f;
-                let imm20: u32 = u32::from_str_radix(&imms, 10)? & 0xfffff;
+                let imm20: u32 = (i32::from_str_radix(&imms, 10)? & 0xfffff) as u32;
 
                 encoded |= rd << 7;
                 encoded |= imm20 << 12;
@@ -742,7 +766,7 @@ fn assemble_instructions(
                 // auipc
                 let (rdn, imms) = (&args[0], &args[1]);
                 let rd: u32 = u32::from_str_radix(&rdn[1..], 10)? & 0x1f;
-                let imm20: u32 = u32::from_str_radix(&imms, 10)? & 0xfffff;
+                let imm20: u32 = (i32::from_str_radix(&imms, 10)? & 0xfffff) as u32;
 
                 encoded |= rd << 7;
                 encoded |= imm20 << 12;
@@ -752,7 +776,7 @@ fn assemble_instructions(
                 let (rdn, imms) = (&args[0], &args[1]);
 
                 let rd: u32 = u32::from_str_radix(&rdn[1..], 10)? & 0x1f;
-                let offset: u32 = u32::from_str_radix(&imms, 10)? & 0xfffff;
+                let offset: u32 = (i32::from_str_radix(&imms, 10)? & 0xfffff) as u32;
 
                 // imm[20|10:1|11|19:12]
                 let j12_19 = (offset >> 12) & 0xff;
@@ -778,7 +802,7 @@ fn assemble_instructions(
 
                 let rd: u32 = u32::from_str_radix(&rdn[1..], 10)? & 0x1f;
                 let rs1: u32 = u32::from_str_radix(&rs1n[1..], 10)? & 0x1f;
-                let imm12: u32 = u32::from_str_radix(&imms, 10)? & 0xfff;
+                let imm12: u32 = (i32::from_str_radix(&imms, 10)? & 0xfff) as u32;
 
                 encoded |= rd << 7;
                 encoded |= fn3 << 12;
@@ -795,7 +819,8 @@ fn assemble_instructions(
 
                 let rs1: u32 = u32::from_str_radix(&rs1n[1..], 10)? & 0x1f;
                 let rs2: u32 = u32::from_str_radix(&rs2n[1..], 10)? & 0x1f;
-                let offset: u32 = u32::from_str_radix(&offsets, 10)? & 0xfff;
+                let offset: u32 = ((i32::from_str_radix(&offsets, 10)? & 0xfff) as u32) as u32;
+                println!("offset");
 
                 let s12: u32 = (offset >> 12) & 0x1;
                 let s11: u32 = (offset >> 11) & 0x1;
@@ -816,7 +841,7 @@ fn assemble_instructions(
 
                 let rd: u32 = u32::from_str_radix(&rdn[1..], 10)? & 0x1f;
                 let rs1: u32 = u32::from_str_radix(&rs1n[1..], 10)? & 0x1f;
-                let imm12: u32 = u32::from_str_radix(&offsets, 10)? & 0xfff;
+                let imm12: u32 = (i32::from_str_radix(&offsets, 10)? & 0xfff) as u32;
 
                 encoded |= rd << 7;
                 encoded |= rs1 << 15;
@@ -829,7 +854,7 @@ fn assemble_instructions(
 
                 let rs1: u32 = u32::from_str_radix(&rs1n[1..], 10)? & 0x1f;
                 let rs2: u32 = u32::from_str_radix(&rs2n[1..], 10)? & 0x1f;
-                let imm12: u32 = u32::from_str_radix(&offsets, 10)? & 0xfff;
+                let imm12: u32 = (i32::from_str_radix(&offsets, 10)? & 0xfff) as u32;
 
                 encoded |= (imm12 & 0b11111) << 7;
                 encoded |= rs1 << 15;
@@ -843,8 +868,7 @@ fn assemble_instructions(
 
                 let rd: u32 = u32::from_str_radix(&rdn[1..], 10)? & 0x1f;
                 let rs1: u32 = u32::from_str_radix(&rs1n[1..], 10)? & 0x1f;
-                let imm12: u32 = u32::from_str_radix(&imms, 10)? & 0xfff;
-
+                let imm12: u32 = (i32::from_str_radix(&imms, 10)? & 0xfff) as u32;
                 encoded |= rd << 7;
                 encoded |= rs1 << 15;
                 encoded |= fn3 << 12;

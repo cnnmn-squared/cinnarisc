@@ -1,4 +1,10 @@
+pub const WIDTH: usize = 640;
+pub const HEIGHT: usize = 400;
+const VGA_GLYPHS: &[u8] = include_bytes!("resources/VGA8.F16");
+
 const XLEN: u32 = 32;
+
+use crate::{Rc, RefCell};
 
 pub struct Memory {
     data: Box<[u8]>,
@@ -91,6 +97,7 @@ impl Region {
 
 pub enum DeviceOption {
     Memory(Memory),
+    VGATextBuffer(Rc<RefCell<VGATextBuffer>>),
 }
 pub struct Device {
     region: Region,
@@ -176,16 +183,20 @@ impl Bus {
                 match ltype {
                     0b000 => memory.load_byte(addr - select.region.lo),
                     0b001 => memory.load_half(addr - select.region.lo),
-                    0b010 => memory.load_half(addr - select.region.lo),
+                    0b010 => memory.load_word(addr - select.region.lo),
                     0b100 => {
-                        panic!("") // lbu
+                        panic!("lbu") // lbu
                     }
                     0b101 => {
-                        panic!("") // lhu
+                        panic!("lhu") // lhu
                     }
-                    _ => panic!(""),
+                    _ => panic!("invalid load type (memory)"),
                 }
-            } // _ => panic!("connect invalid"),
+            }
+
+            DeviceOption::VGATextBuffer(_) => {
+                panic!("pls dont load")
+            }
         }
     }
 
@@ -198,8 +209,18 @@ impl Bus {
                 0b000 => memory.store_byte(addr, value),
                 0b001 => memory.store_half(addr, value),
                 0b010 => memory.store_word(addr, value),
-                _ => panic!(""),
+                _ => panic!("invalid store (memory)"),
             },
+            DeviceOption::VGATextBuffer(vgatb) => {
+                let mut vgatbb = vgatb.borrow_mut();
+
+                match stype {
+                    0b000 => vgatbb.owning.store_byte(addr, value),
+                    0b001 => vgatbb.owning.store_half(addr, value),
+                    0b010 => vgatbb.owning.store_word(addr, value),
+                    _ => panic!("invalid store (vgatb"),
+                }
+            }
         }
         /*def store(self, addr: int, value: int, information: int) -> None:
         condev = self._fdra(addr)
@@ -261,6 +282,97 @@ impl Bus {
         raise Trap(TCause.STORE_ACCESS_FAULT) */
     }
 }
+
+pub struct VGATextBuffer {
+    owning: Memory,
+    assocb: Vec<u32>,
+}
+
+impl VGATextBuffer {
+    pub fn new() -> VGATextBuffer {
+        let buffer: Vec<u32> = vec![0; WIDTH * HEIGHT];
+        VGATextBuffer {
+            owning: Memory::new(4000),
+            assocb: buffer,
+        }
+    }
+
+    fn setchar(&mut self, x: usize, y: usize, ch: char) {
+        let chi: usize = (ch as u8 * 16) as usize;
+        for row in 0..16 {
+            let byte = VGA_GLYPHS[chi + row];
+            println!("byte {} buffers {}", byte, row * WIDTH + y * WIDTH + x);
+            for bitn in 0..8 {
+                self.assocb[row * WIDTH + y * WIDTH + bitn + x] = if (byte >> (7 - bitn)) & 1 == 1 {
+                    0x00ff_ffff
+                } else {
+                    0x0
+                }
+            }
+        }
+    }
+
+    pub fn tick(&mut self) -> Vec<u32> {
+        // expose the Vec so i dont have to share the buffer
+        for halfi in 0..2000 {
+            let half = self.owning.load_half(halfi * 2);
+            let ch = (half & 0xff) as u8 as char;
+            // let flags = ((half >> 8) & 0xff) as u8;
+
+            if ch == 0x00 as char {
+                continue;
+            }
+
+            self.setchar(
+                ((halfi % 80) * 8) as usize,
+                ((halfi / 80) * 16) as usize,
+                ch,
+            );
+        }
+
+        self.assocb.clone() // ! performance
+    }
+}
+
+/*class VGATextBuffer:
+
+def __init__(self, parent: pygame.Surface) -> None:
+    pygame.init()
+
+    self.owning: Memory = Memory(4000)
+    self.parent = parent
+    self.font = pygame.font.Font("resources/vga8x16.ttf", 16)
+    self.cycles_draw = CLOCK_SPEED // 60  # tries to refresh as close to 60hz as possible
+    self.cycles = 0
+
+def drawsc(self) -> None:
+    y, x = 0, 0
+    for i in range(0, self.owning.data.__len__(), 2):
+        half = self.owning.load_half(i)
+        char = half & 0xff
+        _ = (half >> 8) & 0xff
+
+        if char == 0x00:
+            continue
+
+        fon: pygame.Surface = self.font.render(
+            bytes([char]).decode("cp437"), False, (255, 255, 255))
+
+        self.parent.blit(fon, (x * 8, y * 16))
+
+        x += 1
+
+        if x >= 80:
+            y += 1
+            x = 0
+
+    if self.cycles % self.cycles_draw == 0:
+        pygame.display.flip()
+        self.parent.fill((0, 0, 0))
+
+    self.cycles = (self.cycles + 1) % CLOCK_SPEED
+
+    return*/
 
 /*import pygame
 from risclib import Trap, TCause, XLEN

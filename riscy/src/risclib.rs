@@ -130,25 +130,46 @@ pub mod file_processor {
             panic!("size of data has a limit of 65kb.");
         }
 
-        let regionst = DATA_START;
-        let xlenbytes = XLEN; // 8
+        let regionst: u16 = DATA_START as u16;
+        let xlenbytes: u32 = XLEN; // 8 //? why is eight here
 
-        obj.extend(DATA_START.to_le_bytes());
-
-        let dataend: u32 = regionst + data.len() as u32;
-        let tsaligned: u32 = dataend + (xlenbytes - (dataend % xlenbytes));
+        let dataend: u16 = regionst as u16 + data.len() as u16;
+        let tsaligned: u32 = dataend as u32 + (xlenbytes - (dataend as u32 % xlenbytes));
 
         println!("{} {} {} {}", regionst, xlenbytes, dataend, tsaligned);
 
+        obj.extend(regionst.to_le_bytes());
         obj.extend(dataend.to_le_bytes());
         obj.extend(tsaligned.to_le_bytes());
 
         obj.extend(vec![0; regionst as usize - obj.len()]);
         obj.extend(data);
 
-        obj.extend(vec![0; (tsaligned - dataend) as usize]);
+        obj.extend(vec![0; (tsaligned - dataend as u32) as usize]);
         obj.extend(text);
 
+        /*println!("{} -> {}, {}", regionst, dataend, tsaligned);
+        println!(
+            "{:?}, {:?}, {:?}",
+            &regionst.to_le_bytes(),
+            &dataend.to_le_bytes(),
+            &tsaligned.to_le_bytes()
+        );*/
         Ok(obj)
+    }
+
+    pub fn parsebin(obj: &[u8]) -> Result<(&[u8], &[u8]), Box<dyn Error>> {
+        if &obj[0..5] != FILEHEADER {
+            panic!("invalid file type (safety)")
+        }
+
+        /*println!("{:#?}", &obj[0..13]);*/
+        let data_start = u16::from_le_bytes(obj[5..7].try_into()?) as usize;
+        let data_end = u16::from_le_bytes(obj[7..9].try_into()?) as usize;
+        let text_start = u32::from_le_bytes(obj[9..13].try_into()?) as usize;
+
+        /*println!("{}->{}, {}", data_start, data_end, text_start);*/
+
+        return Ok((&obj[data_start..data_end], &obj[text_start..]));
     }
 }

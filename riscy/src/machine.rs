@@ -5,20 +5,23 @@ const RESET_VECTOR: u32 = 0x1000;
 mod decoder {
     pub fn fetch(from: u32, lo: u32, hi: u32) -> i32 {
         // ヾ(＾∇＾)
-        println!("fetch");
-        ((from >> lo) & ((1u64 << (hi - lo)) - 1) as u32) as i32
+        // println!("fetch");
+        ((from >> lo) & ((1u64 << (hi - lo + 1)) - 1) as u32) as i32
     }
 }
 
 fn sextend(from: i32, bits: u32) -> i32 {
-    (from << (32 - bits)) >> (32 - bits) // rust auto sign extends (learnt that today wow)
+    let into: i32 = ((from << (32 - bits)) as i32) >> (32 - bits);
+
+    println!("{:#b}", into);
+    into
 }
 
 pub struct Core {
     general_registers: Vec<i32>,
     pc: u32,
     bus: Bus,
-    // trace l8r
+    trace: Vec<String>,
 }
 
 impl Core {
@@ -32,6 +35,7 @@ impl Core {
             general_registers: gr,
             pc: 0,
             bus,
+            trace: Vec::new(),
         }
     }
 
@@ -42,18 +46,31 @@ impl Core {
 
         self.general_registers[0] = 0;
 
-        println!("{}", decoder::fetch(instruction, 0, 7));
-
-        match decoder::fetch(instruction, 0, 7) {
+        //println!("{:#?}", self.trace);
+        //println!("{:?}", self.general_registers);
+        match decoder::fetch(instruction, 0, 6) {
             0b0110111 => {
                 self.general_registers[decoder::fetch(instruction, 7, 11) as usize] =
-                    (decoder::fetch(instruction, 12, 31) << 12) as i32;
+                    (sextend(decoder::fetch(instruction, 12, 31), 20) << 12) as i32;
 
                 // traceinst = f"lui x{decoded['7:11']}, {decoded['12:31']}"
-            } // we now finally have enough code to test it
+                self.trace.push(format!(
+                    "[{:#06x}]  lui x{}, {}",
+                    comp_pc,
+                    decoder::fetch(instruction, 7, 11),
+                    decoder::fetch(instruction, 12, 31)
+                ));
+            }
             0b0010111 => {
                 self.general_registers[decoder::fetch(instruction, 7, 11) as usize] = // rd
                     (self.pc as i32 + (decoder::fetch(instruction, 12, 31) << 12)) as i32;
+
+                self.trace.push(format!(
+                    "[{:#06x}]  auipc x{}, {}",
+                    comp_pc,
+                    decoder::fetch(instruction, 7, 11),
+                    decoder::fetch(instruction, 12, 31)
+                ));
             }
             0b1101111 => {
                 // jal
@@ -62,10 +79,22 @@ impl Core {
                 let s1_10 = decoder::fetch(instruction, 21, 30);
                 let s20 = decoder::fetch(instruction, 31, 31);
 
-                let recons = (s20 << 20) | (s12_19 << 12) | (s11 << 11) | (s1_10 << 1);
+                let recons = sextend(
+                    (s20 << 20) | (s12_19 << 12) | (s11 << 11) | (s1_10 << 1),
+                    20,
+                );
                 self.pc = (comp_pc as i32 + recons) as u32;
                 self.general_registers[decoder::fetch(instruction, 7, 11) as usize] = // rd
-                    (comp_pc + 4) as i32
+                    (comp_pc + 4) as i32;
+
+                self.trace.push(format!(
+                    "[{:#06x}]  jal x{}, {}",
+                    comp_pc,
+                    decoder::fetch(instruction, 7, 11),
+                    recons
+                ));
+
+                println!("{:#?}", self.trace);
             }
             0b1100111 => {
                 // jalr
@@ -73,6 +102,15 @@ impl Core {
                     + decoder::fetch(instruction, 20, 31)) as u32; // rs1 + imm (~1 ??)
                 self.general_registers[decoder::fetch(instruction, 7, 11) as usize] =
                     comp_pc as i32 + 4;
+
+                self.trace.push(format!(
+                    "[{:#06x}]  jalr x{}, {}(x{})",
+                    comp_pc,
+                    decoder::fetch(instruction, 7, 11),
+                    decoder::fetch(instruction, 20, 31),
+                    decoder::fetch(instruction, 15, 19),
+                ));
+                println!("{:#?}", self.trace);
             }
             0b1100011 => {
                 // branch
@@ -84,7 +122,10 @@ impl Core {
                 let s5_10: u32 = decoder::fetch(instruction, 25, 30) as u32;
                 let s12: u32 = decoder::fetch(instruction, 31, 31) as u32;
 
-                let recons: i32 = ((s12 << 12) | (s11 << 11) | (s5_10 << 5) | (s1_4 << 1)) as i32;
+                let recons: i32 = sextend(
+                    ((s12 << 12) | (s11 << 11) | (s5_10 << 5) | (s1_4 << 1)) as i32,
+                    13,
+                );
 
                 let fn3: u32 = decoder::fetch(instruction, 12, 14) as u32;
 
@@ -99,6 +140,18 @@ impl Core {
                 } {
                     self.pc = (comp_pc as i32 + recons) as u32
                 } /* look at how much more efficient */
+
+                self.trace.push(format!(
+                    "[{:#06x}]  BNC x{}, x{}, {} # {} ?= {} # {:#12x}",
+                    comp_pc,
+                    decoder::fetch(instruction, 15, 19),
+                    decoder::fetch(instruction, 20, 24),
+                    recons,
+                    rs1,
+                    rs2,
+                    instruction
+                ));
+                println!("{:#?}", self.trace);
             }
 
             0b0000011 => {
@@ -123,24 +176,62 @@ impl Core {
                             as u32,
                         fn3.try_into().unwrap(),
                     );
+
+                self.trace.push(format!(
+                    "[{:#06x}]  l{} x{}, {}(x{})",
+                    comp_pc,
+                    match fn3 {
+                        0b000 => "b",
+                        0b001 => "h",
+                        0b010 => "w",
+                        0b100 => "bu",
+                        0b101 => "hu",
+                        _ => panic!("load fn3 error while tracing"),
+                    },
+                    decoder::fetch(instruction, 7, 11),
+                    decoder::fetch(instruction, 20, 31),
+                    decoder::fetch(instruction, 15, 19),
+                ));
             }
 
             0b0100011 => {
                 // Store
                 self.bus.store(
                     (self.general_registers[decoder::fetch(instruction, 15, 19) as usize]
-                        + ((decoder::fetch(instruction, 25, 31) << 5)
-                            | sextend(decoder::fetch(instruction, 7, 11), 12)))
-                        as u32,
+                        + sextend(
+                            (decoder::fetch(instruction, 25, 31) << 5)
+                                | decoder::fetch(instruction, 7, 11),
+                            12,
+                        )) as u32,
                     self.general_registers[decoder::fetch(instruction, 20, 24) as usize],
                     (decoder::fetch(instruction, 12, 14) as u32)
                         .try_into()
                         .unwrap(),
                 );
+
+                self.trace.push(format!(
+                    "[{:#06x}]  s{} x{}, {}(x{})",
+                    comp_pc,
+                    match (decoder::fetch(instruction, 12, 14) as u32)
+                        .try_into()
+                        .unwrap()
+                    {
+                        0b000 => "b",
+                        0b001 => "h",
+                        0b010 => "w",
+                        _ => panic!("store fn3 error while tracing"),
+                    },
+                    decoder::fetch(instruction, 20, 24),
+                    (decoder::fetch(instruction, 25, 31) << 5) | decoder::fetch(instruction, 7, 11),
+                    decoder::fetch(instruction, 15, 19),
+                ));
             }
 
             0b0010011 => {
+                println!("{:#5x}", decoder::fetch(instruction, 20, 31));
                 let imm: i32 = sextend(decoder::fetch(instruction, 20, 31), 12);
+
+                println!("{}", imm);
                 let rs1: i32 = self.general_registers[decoder::fetch(instruction, 15, 19) as usize];
 
                 self.general_registers[decoder::fetch(instruction, 7, 11) as usize] =
@@ -161,7 +252,28 @@ impl Core {
                             }
                         }
                         _ => panic!("unknown fn7 in i type!"),
-                    }
+                    };
+
+                self.trace.push(format!(
+                    "[{:#06x}]  {} x{}, {}(x{}) # {:#12x}",
+                    comp_pc,
+                    match (decoder::fetch(instruction, 12, 14) as u32)
+                        .try_into()
+                        .unwrap()
+                    {
+                        0b000 => "addi",
+                        0b010 => "slti",
+                        0b011 => "sltiu",
+                        0b100 => "xori",
+                        0b110 => "ori",
+                        0b111 => "andi",
+                        _ => panic!("itype fn3 error while tracing"),
+                    },
+                    decoder::fetch(instruction, 7, 11),
+                    imm,
+                    decoder::fetch(instruction, 15, 19),
+                    instruction
+                ));
             }
 
             0b0110011 => {
@@ -220,12 +332,20 @@ impl Core {
                 }
             }
 
-            _ => panic!("ILLEGAL"), // Trap(TCause.ILLEGAL_INSTRUCTION)
+            _ => panic!(
+                "ILLEGAL {} {}",
+                instruction,
+                decoder::fetch(instruction, 0, 6)
+            ), // Trap(TCause.ILLEGAL_INSTRUCTION)
         }
     }
 
     fn fetch(&self) -> u32 {
-        self.bus.load(self.pc as u32, 0b010).cast_unsigned()
+        let fetched = self.bus.load(self.pc as u32, 0b010) as u32;
+
+        println!("fetched {:#012x} from {:#04x}", fetched, self.pc);
+
+        fetched
 
         // Trap(TCause.INSTRUCTION_ADDRESS_MISALIGNED)
 
