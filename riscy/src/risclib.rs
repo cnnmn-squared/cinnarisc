@@ -173,3 +173,78 @@ pub mod file_processor {
         return Ok((&obj[data_start..data_end], &obj[text_start..]));
     }
 }
+
+#[allow(non_camel_case_types)]
+pub enum Trap {
+    INSTRUCTION_ADDRESS_MISALIGNED, // 0x0
+    INSTRUCTION_ACCESS_FAULT,       // 0x1
+    ILLEGAL_INSTRUCTION,            // 0x2
+    BREAKPOINT,                     // 0x3
+
+    LOAD_ADDRESS_MISALIGNED, // 0x4
+    LOAD_ACCESS_FAULT,       // 0x5
+
+    STORE_ADDRESS_MISALIGNED, // 0x6
+    STORE_ACCESS_FAULT,       // 0x7
+
+    ENV_CALL_FROM_U, // 0x8
+    ENV_CALL_FROM_S, // 0x9
+    // 0xa reserved
+    ENV_CALL_FROM_M, // 0xb
+
+    INSTRUCTION_PAGE_FAULT, // 0x0c
+    LOAD_PAGE_FAULT,        // 0x0d
+    // 0xe reserved
+    STORE_PAGE_FAULT, // 0x0f
+
+    DOUBLE_TRAP, // 0x10
+    // 0x11 reserveed
+    SOFTWARE_CHECK, // 0x12
+    HARDWARE_ERROR, // 0x13
+
+    // 0x14 - 0x17
+    // 0x18 - 0x1f private
+    DEVICE_FAULT, // 0x18     PRIVATE
+    INVALID_DEVICE_REGION, // 0x19     PRIVATE
+
+                  // 0x20 - 0x2f reserved
+                  // 0x30 - 0x3f private
+                  // 0x40...  reserved
+}
+
+impl Trap {
+    pub fn expose_err(&self) -> &str {
+        match self {
+            Trap::INSTRUCTION_ADDRESS_MISALIGNED => "INSTRUCTION_ADDRESS_MISALIGNED",
+
+            Trap::INSTRUCTION_ACCESS_FAULT => "INSTRUCTION_ADDRESS_FAULT",
+            Trap::ILLEGAL_INSTRUCTION => "ILLEGAL_INSTRUCTION",
+            Trap::BREAKPOINT => "BREAKPOINT",
+
+            Trap::LOAD_ADDRESS_MISALIGNED => "LOAD_ADDRESS_MISALIGNED",
+            Trap::LOAD_ACCESS_FAULT => "LOAD_ACCESS_FAULT",
+
+            Trap::STORE_ADDRESS_MISALIGNED => "STORE_ACCESS_MISALIGNED",
+            Trap::STORE_ACCESS_FAULT => "STORE_ACCESS_FAULT",
+
+            Trap::ENV_CALL_FROM_U => "ENVIRONMENT CALL (USER)",
+            Trap::ENV_CALL_FROM_S => "ENVIRONMENT CALL (SUPERVISOR)",
+            Trap::ENV_CALL_FROM_M => "ENVIRONMENT CALL (MACHINE)",
+
+            Trap::INSTRUCTION_PAGE_FAULT => "INSTRUCTION_PAGE_FAULT",
+            Trap::LOAD_PAGE_FAULT => "LOAD_PAGE_FAULT",
+            Trap::STORE_PAGE_FAULT => "STORE_PAGE_FAULT",
+
+            Trap::DOUBLE_TRAP => "DOUBLE_TRAP",
+            Trap::SOFTWARE_CHECK => "SOFTWARE_CHECK",
+            Trap::HARDWARE_ERROR => "HARDWARE_ERROR",
+
+            Trap::DEVICE_FAULT => "private DEVICE_FAULT",
+            Trap::INVALID_DEVICE_REGION => "private INVALID_DEVICE_REGION",
+        }
+    }
+}
+
+/*enum LoadErr {
+    // Later possible type, error occurred while loading, eg. RegionError
+}*/

@@ -4,7 +4,10 @@ const VGA_GLYPHS: &[u8] = include_bytes!("resources/VGA8.F16");
 
 const XLEN: u32 = 32;
 
-use crate::{Rc, RefCell};
+use crate::{
+    Rc, RefCell,
+    risclib::Trap::{self, STORE_ACCESS_FAULT},
+};
 
 pub struct Memory {
     data: Box<[u8]>,
@@ -36,47 +39,61 @@ impl Memory {
         *self.data.get(addr as usize).unwrap() as i32
     }
 
-    fn load_half(&self, addr: u32) -> i32 {
+    fn load_half(&self, addr: u32) -> Result<i32, Trap> {
         if addr % 2 != 0 {
-            panic!("misal half") // raise Trap(TCause.LOAD_ADDRESS_MISALIGNED)
+            return Err(Trap::LOAD_ADDRESS_MISALIGNED); // raise Trap(TCause.LOAD_ADDRESS_MISALIGNED)
         }
-        (self.load_byte(addr + 1) << 8) | self.load_byte(addr)
+        Ok((self.load_byte(addr + 1) << 8) | self.load_byte(addr))
     }
 
-    fn load_word(&self, addr: u32) -> i32 {
+    fn load_word(&self, addr: u32) -> Result<i32, Trap> {
         if addr % 4 != 0 {
-            panic!("misal word") // raise Trap(TCause.LOAD_ADDRESS_MISALIGNED)
+            return Err(Trap::LOAD_ADDRESS_MISALIGNED); // raise Trap(TCause.LOAD_ADDRESS_MISALIGNED)
         }
 
-        (self.load_half(addr + 2) << 16) | self.load_half(addr)
+        Ok((self.load_half(addr + 2)? << 16) | self.load_half(addr)?)
     }
 
-    fn store_byte(&mut self, addr: u32, val: i32) {
+    fn store_byte(&mut self, addr: u32, val: i32) -> Result<(), Trap> {
         if val > 0xff {
-            panic!("val too large for sb") // raise Trap(TCause.STORE_ACCESS_FAULT)
+            return Err(Trap::STORE_ACCESS_FAULT); // raise Trap(TCause.STORE_ACCESS_FAULT)
         }
 
         if let Some(byte) = self.data.get_mut(addr as usize) {
-            *byte = val as u8
+            *byte = val as u8;
         }
+
+        Ok(())
     }
 
-    fn store_half(&mut self, addr: u32, val: i32) {
+    fn store_half(&mut self, addr: u32, val: i32) -> Result<(), Trap> {
         if val > 0xffff {
-            panic!("val too large for sh") // raise Trap(TCause.STORE_ACCESS_FAULT)
+            return Err(Trap::STORE_ACCESS_FAULT); // raise Trap(TCause.STORE_ACCESS_FAULT)
         }
 
-        self.store_byte(addr, val & 0xff);
-        self.store_byte(addr + 1, (val >> 8) & 0xff);
+        if addr % 2 != 0 {
+            return Err(Trap::STORE_ADDRESS_MISALIGNED);
+        }
+
+        self.store_byte(addr, val & 0xff)?;
+        self.store_byte(addr + 1, (val >> 8) & 0xff)?;
+
+        return Ok(());
     }
 
-    fn store_word(&mut self, addr: u32, val: i32) {
+    fn store_word(&mut self, addr: u32, val: i32) -> Result<(), Trap> {
         /*if val > 0xffff_ffff {
             panic!("val too large for sw somehow") // raise Trap(TCause.STORE_ACCESS_FAULT)
         }*/
 
-        self.store_half(addr, val & 0xffff);
-        self.store_half(addr + 2, (val >> 16) & 0xffff);
+        if addr % 4 != 0 {
+            return Err(Trap::STORE_ADDRESS_MISALIGNED);
+        }
+
+        self.store_half(addr, val & 0xffff)?;
+        self.store_half(addr + 2, (val >> 16) & 0xffff)?;
+
+        Ok(())
     }
 }
 
@@ -86,7 +103,7 @@ struct Region {
 }
 
 impl Region {
-    pub fn new(lo: u32, hi: u32) -> Region {
+    pub fn new(lo: u32, hi: u32) -> Result<Region, {
         if hi < lo {
             panic!("new region but hi ({}) is < lo ({})", hi, lo);
         }
@@ -128,28 +145,28 @@ impl Bus {
         Bus { devices }
     }
 
-    fn mut_find_devr_from_addr(&mut self, addr: u32) -> &mut Device {
+    fn mut_find_devr_from_addr(&mut self, addr: u32) -> Result<&mut Device, Trap> {
         for device in &mut self.devices {
             if addr >= device.region.lo && addr <= device.region.hi {
-                return device;
+                return Ok(device);
             }
         }
 
-        panic!("invalid device region") // raise Trap(TCause.INVALID_DEVICE_REGION)
+        return Err(Trap::INVALID_DEVICE_REGION); // raise Trap(TCause.INVALID_DEVICE_REGION)
     }
 
-    fn find_devr_from_addr(&self, addr: u32) -> &Device {
+    fn find_devr_from_addr(&self, addr: u32) -> Result<&Device, Trap> {
         for device in &self.devices {
             if addr >= device.region.lo && addr <= device.region.hi {
-                return device;
+                return Ok(device);
             }
         }
 
-        panic!("invalid device region") // raise Trap(TCause.INVALID_DEVICE_REGION)
+        return Err(Trap::INVALID_DEVICE_REGION); // raise Trap(TCause.INVALID_DEVICE_REGION)
     }
 
-    pub fn load(&self, addr: u32, ltype: u8) -> i32 {
-        let select = self.find_devr_from_addr(addr);
+    pub fn load(&self, addr: u32, ltype: u8) -> Result<i32, Trap> {
+        let select = self.find_devr_from_addr(addr)?;
 
         /*def load(self, addr: int, information: int) -> int:
         condev = self._fdra(addr)
@@ -178,30 +195,30 @@ impl Bus {
 
         raise Trap(TCause.LOAD_ACCESS_FAULT) */
 
-        match &select.connect {
+        Ok(match &select.connect {
             DeviceOption::Memory(memory) => {
                 match ltype {
                     0b000 => memory.load_byte(addr - select.region.lo),
-                    0b001 => memory.load_half(addr - select.region.lo),
-                    0b010 => memory.load_word(addr - select.region.lo),
+                    0b001 => memory.load_half(addr - select.region.lo)?,
+                    0b010 => memory.load_word(addr - select.region.lo)?,
                     0b100 => {
-                        panic!("lbu") // lbu
+                        return Err(Trap::LOAD_ACCESS_FAULT); // lbu
                     }
                     0b101 => {
-                        panic!("lhu") // lhu
+                        return Err(Trap::LOAD_ACCESS_FAULT); // lhu
                     }
-                    _ => panic!("invalid load type (memory)"),
+                    _ => return Err(Trap::LOAD_ACCESS_FAULT),
                 }
             }
 
             DeviceOption::VGATextBuffer(_) => {
-                panic!("pls dont load")
+                return Err(Trap::LOAD_ACCESS_FAULT);
             }
-        }
+        })
     }
 
-    pub fn store(&mut self, addr: u32, value: i32, stype: u8) {
-        let select: &mut Device = self.mut_find_devr_from_addr(addr);
+    pub fn store(&mut self, addr: u32, value: i32, stype: u8) -> Result<(), Trap> {
+        let select: &mut Device = self.mut_find_devr_from_addr(addr)?;
 
         //trace
         match &mut select.connect {
@@ -209,7 +226,7 @@ impl Bus {
                 0b000 => memory.store_byte(addr, value),
                 0b001 => memory.store_half(addr, value),
                 0b010 => memory.store_word(addr, value),
-                _ => panic!("invalid store (memory)"),
+                _ => return Err(Trap::STORE_ACCESS_FAULT),
             },
             DeviceOption::VGATextBuffer(vgatb) => {
                 let mut vgatbb = vgatb.borrow_mut();
@@ -218,7 +235,7 @@ impl Bus {
                     0b000 => vgatbb.owning.store_byte(addr, value),
                     0b001 => vgatbb.owning.store_half(addr, value),
                     0b010 => vgatbb.owning.store_word(addr, value),
-                    _ => panic!("invalid store (vgatb"),
+                    _ => return Err(Trap::STORE_ACCESS_FAULT),
                 }
             }
         }
@@ -312,10 +329,10 @@ impl VGATextBuffer {
         }
     }
 
-    pub fn tick(&mut self) -> Vec<u32> {
+    pub fn tick(&mut self) -> Result<Vec<u32>, Trap> {
         // expose the Vec so i dont have to share the buffer
         for halfi in 0..2000 {
-            let half = self.owning.load_half(halfi * 2);
+            let half = self.owning.load_half(halfi * 2)?;
             let ch = (half & 0xff) as u8 as char;
             // let flags = ((half >> 8) & 0xff) as u8;
 
@@ -330,7 +347,7 @@ impl VGATextBuffer {
             );
         }
 
-        self.assocb.clone() // ! performance
+        Ok(self.assocb.clone()) // ! performance
     }
 }
 

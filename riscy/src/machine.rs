@@ -1,5 +1,5 @@
 use crate::devices::Bus;
-
+use crate::risclib::Trap;
 const RESET_VECTOR: u32 = 0x1000;
 
 mod decoder {
@@ -33,15 +33,15 @@ impl Core {
 
         Core {
             general_registers: gr,
-            pc: 0,
+            pc: RESET_VECTOR,
             bus,
             trace: Vec::new(),
         }
     }
 
-    pub fn step(&mut self) {
-        let comp_pc = self.pc;
-        let instruction = self.fetch();
+    pub fn step(&mut self) -> Result<(), Trap> {
+        let comp_pc: u32 = self.pc;
+        let instruction: u32 = self.fetch()?;
         self.pc += 4;
 
         self.general_registers[0] = 0;
@@ -53,7 +53,6 @@ impl Core {
                 self.general_registers[decoder::fetch(instruction, 7, 11) as usize] =
                     (sextend(decoder::fetch(instruction, 12, 31), 20) << 12) as i32;
 
-                // traceinst = f"lui x{decoded['7:11']}, {decoded['12:31']}"
                 self.trace.push(format!(
                     "[{:#06x}]  lui x{}, {}",
                     comp_pc,
@@ -136,7 +135,7 @@ impl Core {
                     0b110 => (rs1 as u32) < (rs2 as u32),  // bltu
                     0b101 => rs1 >= rs2,                   // bge
                     0b111 => (rs1 as u32) >= (rs2 as u32), // bgeu
-                    _ => panic!("fn3 was something unsupported!"),
+                    _ => return Err(Trap::BREAKPOINT), //panic!("fn3 was something unsupported!"),
                 } {
                     self.pc = (comp_pc as i32 + recons) as u32
                 } /* look at how much more efficient */
@@ -175,7 +174,7 @@ impl Core {
                             + sextend(decoder::fetch(instruction, 20, 31), 12))
                             as u32,
                         fn3.try_into().unwrap(),
-                    );
+                    )?;
 
                 self.trace.push(format!(
                     "[{:#06x}]  l{} x{}, {}(x{})",
@@ -207,7 +206,7 @@ impl Core {
                     (decoder::fetch(instruction, 12, 14) as u32)
                         .try_into()
                         .unwrap(),
-                );
+                )?;
 
                 self.trace.push(format!(
                     "[{:#06x}]  s{} x{}, {}(x{})",
@@ -323,29 +322,33 @@ impl Core {
                     }
             } // wow! thats all the major rv31i opcodes.
 
-            0b0001111 => return, // fence but we dont need to worry. (single-thread)
+            0b0001111 => return Ok(()), // fence but we dont need to worry. (single-thread)
             0b1110011 => {
                 // ebreak/ecall
                 match decoder::fetch(instruction, 20, 31) {
-                    0b0000_0000_0000 => panic!("ebreak"),
+                    0b0000_0000_0000 => return Err(Trap::BREAKPOINT), // panic!("ebreak"),
                     _ => panic!("ecall or other"),
                 }
             }
 
-            _ => panic!(
-                "ILLEGAL {} {}",
-                instruction,
-                decoder::fetch(instruction, 0, 6)
-            ), // Trap(TCause.ILLEGAL_INSTRUCTION)
+            _ => return Err(Trap::ILLEGAL_INSTRUCTION), /*panic!(
+                                                        "ILLEGAL {} {}",
+                                                        instruction,
+                                                        decoder::fetch(instruction, 0, 6)*/ // Trap(TCause.ILLEGAL_INSTRUCTION)
         }
+
+        return Ok(());
     }
 
-    fn fetch(&self) -> u32 {
-        let fetched = self.bus.load(self.pc as u32, 0b010) as u32;
+    fn fetch(&self) -> Result<u32, Trap> {
+        if self.pc % 4 != 0 {
+            return Err(Trap::INSTRUCTION_ADDRESS_MISALIGNED);
+        }
+        let fetched = self.bus.load(self.pc as u32, 0b010)? as u32;
 
         println!("fetched {:#012x} from {:#04x}", fetched, self.pc);
 
-        fetched
+        Ok(fetched)
 
         // Trap(TCause.INSTRUCTION_ADDRESS_MISALIGNED)
 

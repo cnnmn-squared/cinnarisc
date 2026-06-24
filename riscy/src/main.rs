@@ -20,32 +20,29 @@ use devices::{HEIGHT, VGATextBuffer, WIDTH};
 use machine::Core;
 use risclib::file_processor::{newfile, parsebin};
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let lines: Vec<String> = vec![
-        ".org 0x00001000".to_string(),
-        ".section .data".to_string(),
-        "byte abc = 250".to_string(),
-        ".section .text".to_string(),
-        "lui ra, 0x0001".to_string(),
-    ];
+use crate::risclib::Trap;
 
-    let mut asm_bytes: Vec<u8> = Vec::new();
+fn trap<T>(result: Result<T, Trap>) -> Result<T, Box<dyn Error>> {
+    // trap to stderror
+    if !result.is_ok() {
+        println!("!fault! {:?}", Trap::expose_err(&result.err().unwrap()));
+        return Err(Box::new(std::fmt::Error));
+    }
+
+    Ok(result.ok().unwrap())
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let mut asm: String = String::new();
     {
         let mut asmread: File = File::open("src/bench/arithmetic.s")?;
-        asmread.read_to_end(&mut asm_bytes)?;
+        asmread.read_to_string(&mut asm)?;
     }
-    let asm_lines: Vec<String> = asm_bytes
-        .iter()
-        .map(|byte| (*byte as char).to_string())
-        .collect::<Vec<String>>()
-        .join("")
-        .split("\n")
-        .map(|string| string.to_string())
-        .collect();
+    let asm_lines: Vec<String> = asm.lines().map(|v: &str| v.to_string()).collect();
 
     {
         let mut wfile: File = File::create("out.obj")?;
-        wfile.write(&build(asm_lines)?)?;
+        wfile.write(&build_asm(asm_lines)?)?;
     }
 
     let mut readbuf: Vec<u8> = Vec::new();
@@ -67,7 +64,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     ]);
 
     for (addr, byte) in mcode.iter().enumerate() {
-        bus.store(addr as u32, *byte as i32, 0b000);
+        trap(bus.store(addr as u32, *byte as i32, 0b000))?;
     }
 
     let mut cpu: Core = Core::new(bus);
@@ -86,39 +83,30 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
 
     while window.is_open() {
-        cpu.step();
+        let cpures: Result<(), Trap> = cpu.step();
+        let vgabuf: Result<Vec<u32>, Trap> = vgatb.borrow_mut().tick();
+        if !cpures.is_ok() {
+            println!("!fault! {:?}", Trap::expose_err(&cpures.err().unwrap()));
+            return Ok(());
+        };
+
+        if !vgabuf.is_ok() {
+            println!("!fault! {:?}", Trap::expose_err(&vgabuf.err().unwrap()));
+            return Ok(());
+        }
+
         window
-            .update_with_buffer(&vgatb.borrow_mut().tick(), WIDTH, HEIGHT)
+            .update_with_buffer(&vgabuf.ok().unwrap(), WIDTH, HEIGHT)
             .unwrap();
     }
 
     Ok(())
 }
 
-fn build(lines: Vec<String>) -> Result<Vec<u8>, Box<dyn Error>> {
+fn build_asm(lines: Vec<String>) -> Result<Vec<u8>, Box<dyn Error>> {
     let (mcode, data) = assemble(lines)?;
 
     Ok(newfile(data, mcode.clone())?)
 }
-/*fn setcharat(x: usize, y: usize, chid: usize, buffer: &mut Vec<u32>, from: &[u8]) {
-    let cha: usize = chid * 16;
-    for row in 0..16 {
-        let byte = from[cha + row];
-        println!("byte {} buffers {}", byte, row * WIDTH + y * WIDTH + x);
-        for bitn in 0..8 {
-            buffer[row * WIDTH + y * WIDTH + bitn + x] = if (byte >> (7 - bitn)) & 1 == 1 {
-                0x00ff_ffff
-            } else {
-                0x0
-            }
-        }
-    }
-}
-fn main() {
-    let mut buffer: Vec<u32> = vec![0; WIDTH * HEIGHT];
 
-    let string = b"Hello, World!";
-    for (i, ch) in string.iter().enumerate() {
-        setcharat((i % 80) * 8, (i / 80) * 16, *ch as usize, &mut buffer, &vga);
-    }
-}*/
+fn build_env() {}
