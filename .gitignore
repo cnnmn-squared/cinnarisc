@@ -9,3 +9,4 @@ riscy/target
 riscy/Cargo.lock
 riscy/out.obj
 riscy/src/hello_world.s
+riscy/src/bench

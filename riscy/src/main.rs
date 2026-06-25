@@ -5,6 +5,7 @@ mod risclib;
 mod runner;
 
 use std::cell::RefCell;
+use std::env::args;
 use std::error::Error;
 use std::fs::File;
 use std::io::{Read, Write};
@@ -20,6 +21,7 @@ use devices::{HEIGHT, VGATextBuffer, WIDTH};
 use machine::Core;
 use risclib::file_processor::{newfile, parsebin};
 
+use crate::machine::RESET_VECTOR;
 use crate::risclib::Trap;
 
 fn trap<T>(result: Result<T, Trap>) -> Result<T, Box<dyn Error>> {
@@ -33,25 +35,45 @@ fn trap<T>(result: Result<T, Trap>) -> Result<T, Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let args: Vec<String> = args().collect(); // args is a Vec<stirng> wrapper
+
+    let src = args[1].clone(); // include dest? 
+    let destv: Vec<&str> = src.split(".").collect();
+
+    println!("{:?}", destv);
+    let dest = destv[..destv.len() - 1].join("") + ".obj";
+
     let mut asm: String = String::new();
     {
-        let mut asmread: File = File::open("src/bench/arithmetic.s")?;
+        let mut asmread: File = File::open(src.as_str())?;
         asmread.read_to_string(&mut asm)?;
     }
     let asm_lines: Vec<String> = asm.lines().map(|v: &str| v.to_string()).collect();
 
     {
-        let mut wfile: File = File::create("out.obj")?;
+        let mut wfile: File = File::create(&dest)?;
         wfile.write(&build_asm(asm_lines)?)?;
     }
 
     let mut readbuf: Vec<u8> = Vec::new();
     {
-        let mut readfile: File = File::open("out.obj")?;
+        let mut readfile: File = File::open(&dest)?;
         readfile.read_to_end(&mut readbuf)?;
     }
-    let (data, mcode) = parsebin(&readbuf)?;
 
+    Ok(run(&readbuf)?)
+}
+
+fn build_asm(lines: Vec<String>) -> Result<Vec<u8>, Box<dyn Error>> {
+    let (mcode, data) = assemble(lines)?;
+
+    Ok(newfile(data, mcode.clone())?)
+}
+
+fn build_env(
+    data: &[u8],
+    mcode: &[u8],
+) -> Result<(Core, Rc<RefCell<VGATextBuffer>>), Box<dyn Error>> {
     let memory: Memory = Memory::new(0x2000);
     let vgatb: Rc<RefCell<VGATextBuffer>> = Rc::new(RefCell::new(VGATextBuffer::new()));
     let mut bus: Bus = Bus::new(vec![
@@ -63,50 +85,59 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
     ]);
 
-    for (addr, byte) in mcode.iter().enumerate() {
+    for (addr, byte) in data.iter().enumerate() {
         trap(bus.store(addr as u32, *byte as i32, 0b000))?;
+        // println!("addr {}, byte {:x}", addr, byte);
+        // println!("{}", trap(bus.load(addr as u32, 0b000))?);
     }
 
-    let mut cpu: Core = Core::new(bus);
+    for (addr, byte) in mcode.iter().enumerate() {
+        trap(bus.store(addr as u32 + RESET_VECTOR, *byte as i32, 0b000))?;
+    }
 
-    let mut window = Window::new(
-        "a",
-        WIDTH,
-        HEIGHT,
-        WindowOptions {
-            scale: X2,
-            ..WindowOptions::default()
-        },
-    )
-    .unwrap_or_else(|e| {
-        panic!("{}", e);
-    });
+    let cpu: Core = Core::new(bus);
 
-    while window.is_open() {
-        let cpures: Result<(), Trap> = cpu.step();
-        let vgabuf: Result<Vec<u32>, Trap> = vgatb.borrow_mut().tick();
-        if !cpures.is_ok() {
-            println!("!fault! {:?}", Trap::expose_err(&cpures.err().unwrap()));
-            return Ok(());
-        };
+    Ok((cpu, vgatb))
+}
 
-        if !vgabuf.is_ok() {
-            println!("!fault! {:?}", Trap::expose_err(&vgabuf.err().unwrap()));
-            return Ok(());
+fn run(readbuf: &[u8]) -> Result<(), Box<dyn Error>> {
+    {
+        let (data, mcode) = parsebin(&readbuf)?;
+
+        let (mut cpu, vgatb) = build_env(data, mcode)?;
+
+        let mut window = Window::new(
+            "emulator",
+            WIDTH,
+            HEIGHT,
+            WindowOptions {
+                scale: X2,
+                ..WindowOptions::default()
+            },
+        )
+        .unwrap_or_else(|e| {
+            panic!("{}", e);
+        });
+
+        while window.is_open() {
+            let cpures: Result<(), Trap> = cpu.step();
+            let vgabuf: Result<Vec<u32>, Trap> = vgatb.borrow_mut().tick();
+            if !cpures.is_ok() {
+                println!("!fault! {:?}", Trap::expose_err(&cpures.err().unwrap()));
+                println!("states: {:?}", cpu.general_registers);
+                return Ok(());
+            };
+
+            if !vgabuf.is_ok() {
+                println!("!fault! {:?}", Trap::expose_err(&vgabuf.err().unwrap()));
+                return Ok(());
+            }
+
+            window
+                .update_with_buffer(&vgabuf.ok().unwrap(), WIDTH, HEIGHT)
+                .unwrap();
         }
-
-        window
-            .update_with_buffer(&vgabuf.ok().unwrap(), WIDTH, HEIGHT)
-            .unwrap();
     }
 
     Ok(())
 }
-
-fn build_asm(lines: Vec<String>) -> Result<Vec<u8>, Box<dyn Error>> {
-    let (mcode, data) = assemble(lines)?;
-
-    Ok(newfile(data, mcode.clone())?)
-}
-
-fn build_env() {}

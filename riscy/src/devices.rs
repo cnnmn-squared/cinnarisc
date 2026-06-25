@@ -2,12 +2,9 @@ pub const WIDTH: usize = 640;
 pub const HEIGHT: usize = 400;
 const VGA_GLYPHS: &[u8] = include_bytes!("resources/VGA8.F16");
 
-const XLEN: u32 = 32;
+pub const XLEN: u32 = 32;
 
-use crate::{
-    Rc, RefCell,
-    risclib::Trap::{self, STORE_ACCESS_FAULT},
-};
+use crate::{Rc, RefCell, risclib::Trap};
 
 pub struct Memory {
     data: Box<[u8]>,
@@ -103,7 +100,7 @@ struct Region {
 }
 
 impl Region {
-    pub fn new(lo: u32, hi: u32) -> Result<Region, {
+    pub fn new(lo: u32, hi: u32) -> Region {
         if hi < lo {
             panic!("new region but hi ({}) is < lo ({})", hi, lo);
         }
@@ -223,22 +220,23 @@ impl Bus {
         //trace
         match &mut select.connect {
             DeviceOption::Memory(memory) => match stype {
-                0b000 => memory.store_byte(addr, value),
-                0b001 => memory.store_half(addr, value),
-                0b010 => memory.store_word(addr, value),
+                0b000 => memory.store_byte(addr, value)?,
+                0b001 => memory.store_half(addr, value)?,
+                0b010 => memory.store_word(addr, value)?,
                 _ => return Err(Trap::STORE_ACCESS_FAULT),
             },
             DeviceOption::VGATextBuffer(vgatb) => {
-                let mut vgatbb = vgatb.borrow_mut();
+                let mut vgatbb: std::cell::RefMut<'_, VGATextBuffer> = vgatb.borrow_mut();
 
                 match stype {
-                    0b000 => vgatbb.owning.store_byte(addr, value),
-                    0b001 => vgatbb.owning.store_half(addr, value),
-                    0b010 => vgatbb.owning.store_word(addr, value),
+                    0b000 => vgatbb.owning.store_byte(addr - select.region.lo, value)?,
+                    0b001 => vgatbb.owning.store_half(addr - select.region.lo, value)?,
+                    0b010 => vgatbb.owning.store_word(addr - select.region.lo, value)?,
                     _ => return Err(Trap::STORE_ACCESS_FAULT),
-                }
+                };
             }
         }
+        Ok(())
         /*def store(self, addr: int, value: int, information: int) -> None:
         condev = self._fdra(addr)
 
@@ -262,21 +260,6 @@ impl Bus {
                 elif store_type == 0b010:
                     condev.device.vram.store_word(addr - condev.region.start,
                                                   value)
-
-                return
-
-            case VGATextBuffer():
-                store_type = information
-                match store_type:
-                    case 0b000:
-                        condev.device.owning.store_byte(
-                            addr - condev.region.start, value)
-                    case 0b001:
-                        condev.device.owning.store_half(
-                            addr - condev.region.start, value)
-                    case 0b010:
-                        condev.device.owning.store_word(
-                            addr - condev.region.start, value)
 
                 return
 
@@ -315,10 +298,9 @@ impl VGATextBuffer {
     }
 
     fn setchar(&mut self, x: usize, y: usize, ch: char) {
-        let chi: usize = (ch as u8 * 16) as usize;
+        let chi: usize = (ch as u8 as u32 * 16) as usize;
         for row in 0..16 {
             let byte = VGA_GLYPHS[chi + row];
-            println!("byte {} buffers {}", byte, row * WIDTH + y * WIDTH + x);
             for bitn in 0..8 {
                 self.assocb[row * WIDTH + y * WIDTH + bitn + x] = if (byte >> (7 - bitn)) & 1 == 1 {
                     0x00ff_ffff
@@ -331,6 +313,7 @@ impl VGATextBuffer {
 
     pub fn tick(&mut self) -> Result<Vec<u32>, Trap> {
         // expose the Vec so i dont have to share the buffer
+
         for halfi in 0..2000 {
             let half = self.owning.load_half(halfi * 2)?;
             let ch = (half & 0xff) as u8 as char;
@@ -339,7 +322,6 @@ impl VGATextBuffer {
             if ch == 0x00 as char {
                 continue;
             }
-
             self.setchar(
                 ((halfi % 80) * 8) as usize,
                 ((halfi / 80) * 16) as usize,
