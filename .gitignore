@@ -1,12 +1,5 @@
-.mypy_cache
-__pycache__
-.flake8
-.style.yapf
+target
+src/bench
 .vscode
-ignoreme
 assembly
-riscy/target
-riscy/Cargo.lock
-riscy/out.obj
-riscy/src/hello_world.s
-riscy/src/bench
+Cargo.lock
