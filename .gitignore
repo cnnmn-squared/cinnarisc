@@ -3,3 +3,4 @@ src/bench
 .vscode
 assembly
 Cargo.lock
+test

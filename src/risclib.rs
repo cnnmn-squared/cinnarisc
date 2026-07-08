@@ -86,14 +86,12 @@ pub enum Trap {
     SOFTWARE_CHECK, // 0x12
     HARDWARE_ERROR, // 0x13
 
-    // 0x14 - 0x17
-    // 0x18 - 0x1f private
-    DEVICE_FAULT, // 0x18     PRIVATE
-    INVALID_DEVICE_REGION, // 0x19     PRIVATE
+                    // 0x14 - 0x17
+                    // 0x18 - 0x1f private
 
-                  // 0x20 - 0x2f reserved
-                  // 0x30 - 0x3f private
-                  // 0x40...  reserved
+                    // 0x20 - 0x2f reserved
+                    // 0x30 - 0x3f private
+                    // 0x40...  reserved
 }
 
 impl Trap {
@@ -122,13 +120,12 @@ impl Trap {
             Trap::DOUBLE_TRAP => "DOUBLE_TRAP",
             Trap::SOFTWARE_CHECK => "SOFTWARE_CHECK",
             Trap::HARDWARE_ERROR => "HARDWARE_ERROR",
-
-            Trap::DEVICE_FAULT => "private DEVICE_FAULT",
-            Trap::INVALID_DEVICE_REGION => "private INVALID_DEVICE_REGION",
         }
     }
 }
 
-/*enum LoadErr {
-    // Later possible type, error occurred while loading, eg. RegionError
-}*/
+pub fn sextend(from: i32, bits: u32) -> i32 {
+    let into: i32 = ((from << (32 - bits)) as i32) >> (32 - bits);
+
+    into
+}

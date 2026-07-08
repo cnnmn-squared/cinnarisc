@@ -1,9 +1,13 @@
 use crate::devices::Bus;
-use crate::devices::XLEN;
 use crate::risclib::Trap;
+use crate::risclib::sextend;
 
-pub const RESET_VECTOR: u32 = 0x00001000;
+pub const MXLEN: usize = 32;
+pub const XLEN: usize = 32;
 pub const IALIGN: usize = 32;
+
+pub const RESET_VECTOR: u32 = 0x00000000;
+pub const NMI_VECTOR: u32 = 0x00001000; // priv 3.5
 
 mod decoder {
     pub fn fetch(from: u32, lo: u32, hi: u32) -> i32 {
@@ -13,22 +17,51 @@ mod decoder {
     }
 }
 
-fn sextend(from: i32, bits: u32) -> i32 {
-    let into: i32 = ((from << (32 - bits)) as i32) >> (32 - bits);
+mod csr_consts {
+    pub const MXL: u32 = 0b01; // RV32
+    pub const MISAE: u32 = 0b00_0000_0000_0001_0001_0000_0000; // Extensions IM
 
-    // println!("{:#b}", into);
-    into
+    pub mod indexes {
+        // machine information (MRO)
+        pub const MVENDORID: usize = 0xf11; // Vendor ID
+        pub const MARCHID: usize = 0xf12; // Architecture ID
+        pub const MIMPID: usize = 0xf13; // Implementation ID
+        pub const MHARTID: usize = 0xf14; // Hardware Thread ID
+        pub const MCONFIGPTR: usize = 0xf15; // ptr to configuration structure
+
+        // machine trap setup (MRW)
+        pub const MSTATUS: usize = 0x300; // machine status
+        pub const MISA: usize = 0x301; // ISA and exceptions
+        pub const MEDELEG: usize = 0x302; // exception delegation register
+        pub const MIDELEG: usize = 0x303; // interrupt delegation register
+        pub const MIE: usize = 0x304; // machine interrupt-enable
+        pub const MTVEC: usize = 0x305; // trap handler base address
+        pub const MCOUNTEREN: usize = 0x306; // counter enable
+        pub const MSTATUSH: usize = 0x310; // additional machine status (hi)
+        pub const MEDELEGH: usize = 0x312; // upper 32 bits
+
+        // machine trap handling (MRW)
+        pub const MSCRATCH: usize = 0x340; // scratch register
+        pub const MEPC: usize = 0x341; // program counter @ exception
+        pub const MCAUSE: usize = 0x342; // cause
+        pub const MTVAL: usize = 0x343; // value
+        pub const MIP: usize = 0x344; // interrupt pending
+        pub const MTINST: usize = 0x34A; // instruction that trapped
+        pub const MTVAL2: usize = 0x34B; // val2
+    }
 }
 
 pub struct Core {
     pub general_registers: Vec<i32>,
     pub pc: u32,
+    pub csr: [u32; 4096],
     pub bus: Bus,
     pub trace: Vec<String>,
+    pub entry: u32, // doomed to change
 }
 
 impl Core {
-    pub fn new(bus: Bus) -> Core {
+    pub fn new(bus: Bus, entry: u32) -> Core {
         let mut gr: Vec<i32> = Vec::new();
         for _ in 0..32 {
             gr.push(0)
@@ -36,21 +69,101 @@ impl Core {
 
         Core {
             general_registers: gr,
-            pc: RESET_VECTOR,
+            pc: entry,
+            csr: Core::setup_csr(),
             bus,
             trace: Vec::new(),
+            entry,
         }
     }
 
-    pub fn step(&mut self) -> Result<(), Trap> {
-        let comp_pc: u32 = self.pc;
-        let instruction: u32 = self.fetch()?;
-        self.pc += 4;
+    fn setup_csr() -> [u32; 4096] {
+        let misa: u32 = (csr_consts::MXL << (MXLEN - 2)) | csr_consts::MISAE;
+        // non-commercial specification lists vendor as 0, march is also 0 but can be allocated
+        // mimpid 0 if you dont want to implement it (which i dont)
+        // mhartid, there must be a hart with id 0 (3.1.5) and we only use 1 hart right?
+        // mstatus/mstatush is confusing 3.1.6 come back
+        // i dont think any other csrs are on-setup
 
+        let mut csrs: [u32; 4096] = [0; 4096];
+
+        csrs[csr_consts::indexes::MISA] = misa;
+        csrs
+    }
+
+    pub fn step(&mut self) {
+        let pc: u32 = self.pc;
+        let fetchresult: Result<u32, Trap> = self.fetch();
+        let instruction: u32 = match self.trap_or(fetchresult) {
+            Some(instruction) => instruction,
+            None => {
+                self.pc = NMI_VECTOR;
+                if !self.fetch().is_ok() {
+                    self.double_trap();
+                }
+                u32::MAX
+            }
+        };
+
+        if instruction == u32::MAX {
+            return;
+        }
+
+        let compresult: Result<(), Trap> = self.compute(pc, instruction);
+        self.trap_or(compresult);
+    }
+
+    fn trap_or<T>(&mut self, trap: Result<T, Trap>) -> Option<T> {
+        if !trap.is_ok() {
+            let code = match trap.err().unwrap() {
+                Trap::INSTRUCTION_ADDRESS_MISALIGNED => 0x00,
+                Trap::INSTRUCTION_ACCESS_FAULT => 0x01,
+                Trap::ILLEGAL_INSTRUCTION => 0x02,
+                Trap::BREAKPOINT => 0x03,
+
+                Trap::LOAD_ADDRESS_MISALIGNED => 0x04,
+                Trap::LOAD_ACCESS_FAULT => 0x05,
+
+                Trap::STORE_ADDRESS_MISALIGNED => 0x06,
+                Trap::STORE_ACCESS_FAULT => 0x07,
+
+                Trap::ENV_CALL_FROM_U => 0x08,
+                Trap::ENV_CALL_FROM_S => 0x09,
+                // reserved 0x0a
+                Trap::ENV_CALL_FROM_M => 0x0b,
+
+                Trap::INSTRUCTION_PAGE_FAULT => 0x0c,
+                Trap::LOAD_PAGE_FAULT => 0x0d,
+                // reserved 0x0e
+                Trap::STORE_PAGE_FAULT => 0x0f,
+
+                Trap::DOUBLE_TRAP => 0x10,
+                // reserved 0x11
+                Trap::SOFTWARE_CHECK => 0x12,
+                Trap::HARDWARE_ERROR => 0x13,
+                // 0x14 -> 0x17 reserved
+                // 0x18 -> 0x1f dfcu (private)
+                // 0x20 -> 0x2f reserved
+                // 0x30 -> 0x3f dfcu (private)
+                // 0x40 ->> reserved
+            };
+
+            self.csr[csr_consts::indexes::MCAUSE] = code;
+            self.csr[csr_consts::indexes::MEPC] = self.pc;
+            None
+        } else {
+            trap.ok()
+        }
+    }
+
+    fn double_trap(&mut self) {
+        // send it to boot
+        self.reset(true);
+    }
+
+    fn compute(&mut self, pc: u32, instruction: u32) -> Result<(), Trap> {
         self.general_registers[0] = 0;
 
-        //println!("{:#?}", self.trace);
-        //println!("{:?}", self.general_registers);
         match decoder::fetch(instruction, 0, 6) {
             0b0110111 => {
                 self.general_registers[decoder::fetch(instruction, 7, 11) as usize] =
@@ -58,7 +171,7 @@ impl Core {
 
                 self.trace.push(format!(
                     "[{:#06x}]  lui x{}, {}",
-                    comp_pc,
+                    pc,
                     decoder::fetch(instruction, 7, 11),
                     decoder::fetch(instruction, 12, 31)
                 ));
@@ -69,7 +182,7 @@ impl Core {
 
                 self.trace.push(format!(
                     "[{:#06x}]  auipc x{}, {}",
-                    comp_pc,
+                    pc,
                     decoder::fetch(instruction, 7, 11),
                     decoder::fetch(instruction, 12, 31)
                 ));
@@ -90,13 +203,13 @@ impl Core {
                     address is not aligned to a four-byte boundary. */
                     return Err(Trap::INSTRUCTION_ADDRESS_MISALIGNED);
                 }
-                self.pc = (comp_pc as i32 + recons) as u32;
+                self.pc = (pc as i32 + recons) as u32;
                 self.general_registers[decoder::fetch(instruction, 7, 11) as usize] = // rd
-                    (comp_pc + 4) as i32;
+                    (pc + 4) as i32;
 
                 self.trace.push(format!(
                     "[{:#06x}]  jal x{}, {}",
-                    comp_pc,
+                    pc,
                     decoder::fetch(instruction, 7, 11),
                     recons
                 ));
@@ -113,12 +226,11 @@ impl Core {
                 self.pc = (self.general_registers[decoder::fetch(instruction, 15, 19) as usize]
                     + sextend(decoder::fetch(instruction, 20, 31), 12))
                     as u32; // rs1 + imm (~1 ??)
-                self.general_registers[decoder::fetch(instruction, 7, 11) as usize] =
-                    comp_pc as i32 + 4;
+                self.general_registers[decoder::fetch(instruction, 7, 11) as usize] = pc as i32 + 4;
 
                 self.trace.push(format!(
                     "[{:#06x}]  jalr x{}, {}(x{})",
-                    comp_pc,
+                    pc,
                     decoder::fetch(instruction, 7, 11),
                     decoder::fetch(instruction, 20, 31),
                     decoder::fetch(instruction, 15, 19),
@@ -151,12 +263,12 @@ impl Core {
                     0b111 => (rs1 as u32) >= (rs2 as u32),      // bgeu
                     _ => return Err(Trap::ILLEGAL_INSTRUCTION), //panic!("fn3 was something unsupported!"),
                 } {
-                    self.pc = (comp_pc as i32 + recons) as u32
+                    self.pc = (pc as i32 + recons) as u32
                 } /* look at how much more efficient */
 
                 self.trace.push(format!(
                     "[{:#06x}]  BNC x{}, x{}, {} # {} ?= {} # {:#12x}",
-                    comp_pc,
+                    pc,
                     decoder::fetch(instruction, 15, 19),
                     decoder::fetch(instruction, 20, 24),
                     recons,
@@ -181,18 +293,34 @@ impl Core {
                         );
                     return;
                 }*/
-
-                self.general_registers[decoder::fetch(instruction, 7, 11) as usize] =
-                    self.bus.load(
-                        (self.general_registers[decoder::fetch(instruction, 15, 19) as usize]
-                            + sextend(decoder::fetch(instruction, 20, 31), 12))
-                            as u32,
-                        fn3.try_into().unwrap(),
-                    )?;
+                if fn3 <= 3 {
+                    self.general_registers[decoder::fetch(instruction, 7, 11) as usize] = sextend(
+                        self.bus.load(
+                            (self.general_registers[decoder::fetch(instruction, 15, 19) as usize]
+                                + sextend(decoder::fetch(instruction, 20, 31), 12))
+                                as u32,
+                            fn3.try_into().unwrap(),
+                        )?,
+                        match fn3 {
+                            0b000 => 8,
+                            0b001 => 16,
+                            0b010 => 32,
+                            _ => return Err(Trap::ILLEGAL_INSTRUCTION),
+                        },
+                    );
+                } else {
+                    self.general_registers[decoder::fetch(instruction, 7, 11) as usize] =
+                        self.bus.load(
+                            (self.general_registers[decoder::fetch(instruction, 15, 19) as usize]
+                                + sextend(decoder::fetch(instruction, 20, 31), 12))
+                                as u32,
+                            fn3.try_into().unwrap(),
+                        )?;
+                }
 
                 self.trace.push(format!(
                     "[{:#06x}]  l{} x{}, {}(x{})",
-                    comp_pc,
+                    pc,
                     match fn3 {
                         0b000 => "b",
                         0b001 => "h",
@@ -224,7 +352,7 @@ impl Core {
 
                 self.trace.push(format!(
                     "[{:#06x}]  s{} x{}, {}(x{})",
-                    comp_pc,
+                    pc,
                     match (decoder::fetch(instruction, 12, 14) as u32)
                         .try_into()
                         .unwrap()
@@ -279,9 +407,9 @@ impl Core {
                         _ => return Err(Trap::ILLEGAL_INSTRUCTION),
                     };
 
-                self.trace.push(format!(
+                /*self.trace.push(format!(
                     "[{:#06x}]  {} x{}, {}(x{}) # {:#12x}",
-                    comp_pc,
+                    pc,
                     match (decoder::fetch(instruction, 12, 14) as u32)
                         .try_into()
                         .unwrap()
@@ -298,7 +426,7 @@ impl Core {
                     imm,
                     decoder::fetch(instruction, 15, 19),
                     instruction
-                ));
+                ));*/
             }
 
             0b0110011 => {
@@ -353,7 +481,7 @@ impl Core {
 
                 self.trace.push(format!(
                     "[{:#06x}]  rr x{}, x{}, x{}",
-                    comp_pc,
+                    pc,
                     /*match fn3 {
                         0b000 => "b",
                         0b001 => "h",
@@ -366,16 +494,82 @@ impl Core {
                     decoder::fetch(instruction, 15, 19),
                     decoder::fetch(instruction, 20, 24),
                 ));
-
-                // println!("{:#?}", self.trace);
             } // wow! thats all the major rv31i opcodes.
 
             0b0001111 => return Ok(()), // fence but we dont need to worry. (single-thread)
             0b1110011 => {
                 // ebreak/ecall
+                // 3.3.1
+                self.csr[csr_consts::indexes::MEPC] = pc; // 3.3.1
                 match decoder::fetch(instruction, 20, 31) {
-                    0b0000_0000_0000 => return Err(Trap::BREAKPOINT), // panic!("ebreak"),
-                    _ => panic!("ecall or other"),
+                    0b0000_0000_0000 => return Err(Trap::ENV_CALL_FROM_M),
+                    0b0000_0000_0001 => return Err(Trap::BREAKPOINT),
+                    0b0011_0000_0010 => self.pc = self.csr[csr_consts::indexes::MEPC],
+                    _ => {
+                        self.general_registers[decoder::fetch(instruction, 7, 11) as usize] =
+                            match decoder::fetch(instruction, 12, 14) {
+                                0b001 => {
+                                    let csrt =
+                                        self.csr[decoder::fetch(instruction, 20, 31) as usize];
+                                    self.csr[decoder::fetch(instruction, 20, 31) as usize] = self
+                                        .general_registers
+                                        [decoder::fetch(instruction, 15, 19) as usize]
+                                        as u32;
+                                    // If rd=x0, then the instruction shall not read the CSR and shall not cause any of the side effects that might occur on a If rd=x0, then the instruction shall not read the CSR and shall not cause any of the side effects that might occur on a CSR read.CSR read. /? ??
+
+                                    csrt as i32
+                                }
+                                // CSRRW
+                                0b010 => {
+                                    let csrt =
+                                        self.csr[decoder::fetch(instruction, 20, 31) as usize];
+                                    self.csr[decoder::fetch(instruction, 20, 31) as usize] = self
+                                        .general_registers
+                                        [decoder::fetch(instruction, 15, 19) as usize]
+                                        as u32
+                                        | csrt;
+
+                                    csrt as i32
+                                } // CSRRS
+                                0b011 => {
+                                    let csrt =
+                                        self.csr[decoder::fetch(instruction, 20, 31) as usize];
+                                    self.csr[decoder::fetch(instruction, 20, 31) as usize] = csrt
+                                        & !self.general_registers
+                                            [decoder::fetch(instruction, 15, 19) as usize]
+                                            as u32;
+
+                                    csrt as i32 // remember to zeroextend but all of these are u32 anyways so what could you possibly extend?
+                                } // CSRRC
+                                0b101 => {
+                                    let csrt =
+                                        self.csr[decoder::fetch(instruction, 20, 31) as usize];
+                                    self.csr[decoder::fetch(instruction, 20, 31) as usize] =
+                                        decoder::fetch(instruction, 15, 19) as u32;
+                                    // If rd=x0, then the instruction shall not read the CSR and shall not cause any of the side effects that might occur on a If rd=x0, then the instruction shall not read the CSR and shall not cause any of the side effects that might occur on a CSR read.CSR read. //???
+
+                                    csrt as i32
+                                }
+                                // CSRRWI
+                                0b110 => {
+                                    let csrt =
+                                        self.csr[decoder::fetch(instruction, 20, 31) as usize];
+                                    self.csr[decoder::fetch(instruction, 20, 31) as usize] =
+                                        decoder::fetch(instruction, 15, 19) as u32 | csrt;
+
+                                    csrt as i32
+                                } // CSRRSI
+                                0b111 => {
+                                    let csrt =
+                                        self.csr[decoder::fetch(instruction, 20, 31) as usize];
+                                    self.csr[decoder::fetch(instruction, 20, 31) as usize] =
+                                        csrt & !decoder::fetch(instruction, 15, 19) as u32;
+
+                                    csrt as i32 // remember to zeroextend but all of these are u32 anyways so what could you possibly extend?
+                                } // CSRRCI
+                                _ => return Err(Trap::ILLEGAL_INSTRUCTION),
+                            }
+                    }
                 }
             }
 
@@ -385,80 +579,37 @@ impl Core {
         return Ok(());
     }
 
-    fn fetch(&self) -> Result<u32, Trap> {
+    fn reset(&mut self, isdouble: bool) {
+        // remind me to make a bootloader when i add elf loading or something
+        // 3.4 Reset
+        self.csr[csr_consts::indexes::MIE] = 0;
+        // ! mprv
+        // ! mstatus stuff
+
+        self.pc = RESET_VECTOR;
+        // other stuff ig.
+        // mcause after reset MAY have implementation spec, 0 is default though?
+        self.csr[csr_consts::indexes::MCAUSE] = if isdouble { 0x10 } else { 0x00 }; // DOUBLE_TRAP
+    }
+
+    fn fetch(&mut self) -> Result<u32, Trap> {
         if self.pc % (IALIGN / 8) as u32 != 0 {
             return Err(Trap::INSTRUCTION_ADDRESS_MISALIGNED);
         }
-        let fetched = self.bus.load(self.pc as u32, 0b010)? as u32;
+        let fetched = match self.bus.load(self.pc as u32, 0b010) {
+            Ok(v) => v as u32,
+            Err(cause) => {
+                return Err(match cause {
+                    Trap::LOAD_ACCESS_FAULT => Trap::INSTRUCTION_ACCESS_FAULT,
+                    Trap::LOAD_ADDRESS_MISALIGNED => Trap::INSTRUCTION_ADDRESS_MISALIGNED, // should be caught by first check
+                    Trap::LOAD_PAGE_FAULT => Trap::INSTRUCTION_PAGE_FAULT, // idk what this is
+                    _cause => _cause,                                      // transparent the rest
+                });
+            } // actually map it for once
+        };
 
-        // println!("fetched {:#012x} from {:#04x}", fetched, self.pc);
+        self.pc += 4;
 
         Ok(fetched)
-
-        // Trap(TCause.INSTRUCTION_ADDRESS_MISALIGNED)
-
-        // log(instruction.to_bytes(length=4, byteorder="little"))
     }
 }
-/*
-
-            case 0b1110011:  # 0xc0ffee
-                fn12 = decoded["20:31"]
-
-                if fn12 == 0b0000_0000_0000:
-                    print("execution passed to debugger")
-
-                    match self.gpr[31]:  # x31
-                        case 0x0:
-                            # general
-                            self.dump()
-
-                        case 0x1:
-                            # dump region (x29, x30)
-                            rs = self.gpr[29].v  # x29
-                            rz = self.gpr[30].v  # x30, Region siZe
-
-                            with open("dump.dump", "wb") as dump:
-                                dump.write(
-                                    self.bus.devices[0].device.data[rs:rs + rz]
-                                )  # could lead to arbitrary writing if 0 isnt gpm
-
-                            print("execution halted: ram dumped")
-
-                        case 0x2:
-                            # shutdown
-                            pass
-
-                        case 0x3:
-                            # dump memory & core
-                            # dump region (x29, x30)
-                            rs = self.gpr[29].v  # x29
-                            rz = self.gpr[30].v  # x30, Region siZe
-
-                            with open("dump.dump", "wb") as dump:
-                                dump.write(
-                                    self.bus.devices[0].device.data[rs:rs + rz]
-                                )  # could lead to arbitrary writing if 0 isnt gpm
-
-                            print("execution halted: ram dumped")
-                            self.dump()
-
-                        case 0x4:
-                            print("execution halted: bus trace")
-                            print(self.bus.trace)
-
-                        case 0x5:
-                            pass
-
-                        case 0x6:
-                            pass
-
-                        case _:
-                            self.dump()
-
-                    # self.dump()
-
-                    exit()
-                else:
-                    pass
-*/

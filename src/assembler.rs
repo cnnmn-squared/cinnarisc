@@ -1,16 +1,16 @@
 use std::{collections::HashMap, error::Error};
 
-const DEBUG: bool = false;
+// const DEBUG: bool = false;
 
 struct Symbol {
-    symbol: String,
+    // symbol: String,
     at: u32,
 }
 
 impl Symbol {
-    fn new(symbol: &str, at: u32) -> Symbol {
+    fn new(at: u32) -> Symbol {
         Symbol {
-            symbol: symbol.to_string(),
+            // symbol: symbol.to_string(),
             at: at,
         }
     }
@@ -341,7 +341,7 @@ fn process_data_section(lines: Vec<Line>) -> (HashMap<String, Symbol>, Vec<u8>) 
                     panic!("{value} is too large for {vtype} (variable {name})")
                 }
 
-                symbolmap.insert(name.to_string(), Symbol::new(name, data_ptr));
+                symbolmap.insert(name.to_string(), Symbol::new(data_ptr));
                 data_encoded.extend([vali as u8]);
 
                 data_ptr += 1;
@@ -354,7 +354,7 @@ fn process_data_section(lines: Vec<Line>) -> (HashMap<String, Symbol>, Vec<u8>) 
                     panic!("{value} is too large for {vtype} (variable {name})")
                 }
 
-                symbolmap.insert(name.to_string(), Symbol::new(name, data_ptr));
+                symbolmap.insert(name.to_string(), Symbol::new(data_ptr));
                 data_encoded.extend(vali.to_le_bytes());
 
                 data_ptr += 2;
@@ -367,7 +367,7 @@ fn process_data_section(lines: Vec<Line>) -> (HashMap<String, Symbol>, Vec<u8>) 
                     panic!("{value} is too large for {vtype} (variable {name})")
                 }*/
 
-                symbolmap.insert(name.to_string(), Symbol::new(name, data_ptr));
+                symbolmap.insert(name.to_string(), Symbol::new(data_ptr));
                 data_encoded.extend(vali.to_le_bytes());
 
                 data_ptr += 4;

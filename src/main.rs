@@ -1,30 +1,23 @@
-mod assembler;
-mod devices;
-mod machine;
-mod risclib;
-mod runner;
+use riscy::Error;
+use riscy::args;
+use riscy::{File, Read}; // Write
+use riscy::{Rc, RefCell};
 
-use std::cell::RefCell;
-use std::env::args;
-use std::error::Error;
-use std::fs::File;
-use std::io::{Read, Write};
-use std::rc::Rc;
+use riscy::{Window, WindowOptions};
 
-use minifb::{Scale::X2, Window, WindowOptions};
+use riscy::Bus;
+use riscy::Core;
+use riscy::VGATextBuffer;
+use riscy::devices::StdMemory;
+// use riscy::risclib::file_processor::newfile;
+use riscy::{Device, DeviceOption};
+use riscy::{HEIGHT, WIDTH};
 
-use assembler::assemble;
-use devices::Bus;
-use devices::Memory;
-use devices::{Device, DeviceOption};
-use devices::{HEIGHT, VGATextBuffer, WIDTH};
-use machine::Core;
-use risclib::file_processor::{newfile, parsebin};
+use riscy::Trap;
+// use riscy::assemble;
+use riscy::elf;
 
-use crate::machine::RESET_VECTOR;
-use crate::risclib::Trap;
-
-fn trap<T>(result: Result<T, Trap>) -> Result<T, Box<dyn Error>> {
+/*fn trap<T>(result: Result<T, Trap>) -> Result<T, Box<dyn Error>> {
     // trap to stderror
     if !result.is_ok() {
         println!("!fault! {:?}", Trap::expose_err(&result.err().unwrap()));
@@ -32,52 +25,86 @@ fn trap<T>(result: Result<T, Trap>) -> Result<T, Box<dyn Error>> {
     }
 
     Ok(result.ok().unwrap())
-}
+}*/
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = args().collect(); // args is a Vec<stirng> wrapper
 
-    let src = args[1].clone(); // include dest? 
-    let destv: Vec<&str> = src.split(".").collect();
-
-    println!("{:?}", destv);
-    let dest = destv[..destv.len() - 1].join("") + ".obj";
-
-    let mut asm: String = String::new();
+    let mut asm: Vec<u8> = Vec::new();
     {
-        let mut asmread: File = File::open(src.as_str())?;
-        asmread.read_to_string(&mut asm)?;
-    }
-    let asm_lines: Vec<String> = asm.lines().map(|v: &str| v.to_string()).collect();
-
-    {
-        let mut wfile: File = File::create(&dest)?;
-        wfile.write(&build_asm(asm_lines)?)?;
+        let mut readfile: File = File::open(args[1].clone())?;
+        readfile.read_to_end(&mut asm)?;
     }
 
-    let mut readbuf: Vec<u8> = Vec::new();
-    {
-        let mut readfile: File = File::open(&dest)?;
-        readfile.read_to_end(&mut readbuf)?;
-    }
+    let mut stdmem: StdMemory = StdMemory::new();
 
-    Ok(run(&readbuf)?)
+    let entry = elf::ElfErr::into(elf::load(&asm.to_vec(), &mut stdmem))?;
+
+    let vgatb: Rc<RefCell<VGATextBuffer>> = Rc::new(RefCell::new(VGATextBuffer::new()));
+
+    let bus: Bus = Bus::new(vec![
+        Device::new(0, 0xb8000, DeviceOption::StdMem(stdmem)),
+        Device::new(
+            0xb8000,
+            0xb8000 + 4000,
+            DeviceOption::VGATextBuffer(Rc::clone(&vgatb)),
+        ),
+    ]);
+
+    let mut cpu: Core = Core::new(bus, entry);
+    let mut window = Window::new(
+        "emulator",
+        WIDTH,
+        HEIGHT,
+        WindowOptions {
+            scale: minifb::Scale::X2,
+            ..WindowOptions::default()
+        },
+    )
+    .unwrap_or_else(|e| {
+        panic!("{}", e);
+    });
+
+    println!(
+        "all setup passed:\n    PC: {:#012x}\n    ELFEntry: {:#012x}",
+        cpu.pc, entry
+    );
+
+    while window.is_open() {
+        let cpures: Result<(), Trap> = Ok(cpu.step());
+        let vgabuf: Result<Vec<u32>, Trap> = vgatb.borrow_mut().tick();
+        if !cpures.is_ok() {
+            println!("!fault! {:?}", Trap::expose_err(&cpures.err().unwrap()));
+            println!("states: {:?}", cpu.general_registers);
+            return Ok(());
+        };
+
+        if !vgabuf.is_ok() {
+            println!("!fault! {:?}", Trap::expose_err(&vgabuf.err().unwrap()));
+            return Ok(());
+        }
+
+        window
+            .update_with_buffer(&vgabuf.ok().unwrap(), WIDTH, HEIGHT)
+            .unwrap();
+    }
+    Ok(())
 }
 
-fn build_asm(lines: Vec<String>) -> Result<Vec<u8>, Box<dyn Error>> {
+/*fn build_asm(lines: Vec<String>) -> Result<Vec<u8>, Box<dyn Error>> {
     let (mcode, data) = assemble(lines)?;
 
     Ok(newfile(data, mcode.clone())?)
-}
+}*/
 
-fn build_env(
+/*fn build_env(
     data: &[u8],
     mcode: &[u8],
 ) -> Result<(Core, Rc<RefCell<VGATextBuffer>>), Box<dyn Error>> {
-    let memory: Memory = Memory::new(0x2000);
+    let stdmem: StdMemory = StdMemory::new();
     let vgatb: Rc<RefCell<VGATextBuffer>> = Rc::new(RefCell::new(VGATextBuffer::new()));
     let mut bus: Bus = Bus::new(vec![
-        Device::new(0, 0x1fff, DeviceOption::Memory(memory)),
+        Device::new(0, 0x1fff, DeviceOption::StdMem(stdmem)),
         Device::new(
             0xb8000,
             0xb8000 + 4000,
@@ -111,7 +138,7 @@ fn run(readbuf: &[u8]) -> Result<(), Box<dyn Error>> {
             WIDTH,
             HEIGHT,
             WindowOptions {
-                scale: X2,
+                scale: minifb::Scale::X2,
                 ..WindowOptions::default()
             },
         )
@@ -140,4 +167,28 @@ fn run(readbuf: &[u8]) -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}*/
+
+/*let src = args[1].clone(); // include dest?
+let destv: Vec<&str> = src.split(".").collect();
+
+println!("{:?}", destv);
+let dest = destv[..destv.len() - 1].join("") + ".obj";
+
+let mut asm: String = String::new();
+{
+    let mut asmread: File = File::open(src.as_str())?;
+    asmread.read_to_string(&mut asm)?;
 }
+let asm_lines: Vec<String> = asm.lines().map(|v: &str| v.to_string()).collect();
+
+{
+    let mut wfile: File = File::create(&dest)?;
+    wfile.write(&build_asm(asm_lines)?)?;
+}
+
+let mut readbuf: Vec<u8> = Vec::new();
+{
+    let mut readfile: File = File::open(&dest)?;
+    readfile.read_to_end(&mut readbuf)?;
+}*/
