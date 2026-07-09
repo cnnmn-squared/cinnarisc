@@ -17,7 +17,7 @@ General Purpose RAM, use any of the `store`/`load` instructions to access
     Examples
 
 ```rust
-    let arb = *mut 0x1000;
+    let arb = 0x1000 as *mut u8;
     *arb = 100;
 ```
 ```
@@ -73,7 +73,7 @@ And characters part of `CP437`
 
 ```rust
     // Write 'H' at (10, 0) in colour LIGHT_CYAN
-    let vga = *mut 0xb8000;
+    let vga = 0xb8000 as *mut u8;
 
     // 2 bytes per screen char
     *vga.offset(20) = 0x48; // 0xb800a = 'H'
