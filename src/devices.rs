@@ -212,7 +212,7 @@ impl Page {
 }
 
 pub struct DataEnsuredMemory {
-    // ! this is sure to change, ive just called it this because the address to data is ensured to be valid (unlike stdmem)
+    // ! this is sure to change, ive just called it this because the data is ensured to be valid (unlike stdmem)
     data: Box<[u8]>,
 }
 
@@ -468,6 +468,7 @@ impl VGATextBuffer {
         }
     }
 
+    /// in the font, each pixel is defined by each bit in a byte, so 16 bytes is 1 character.
     fn setchar(&mut self, x: usize, y: usize, ch: char, ffore: u8, fback: u8) {
         let chi: usize = (ch as u8 as u32 * 16) as usize;
         for row in 0..16 {
@@ -536,7 +537,7 @@ impl VGATextBuffer {
         self.row = (self.row + 1) % 25;
 
         Ok(if self.row == 0 {
-            Some(self.assocb.clone())
+            Some(self.assocb.clone()) // expose when vblank
         } else {
             None
         }) // ! performance

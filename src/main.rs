@@ -64,20 +64,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut display_buffer: Vec<u32>;
 
     while window.is_open() {
-        let cpures: Result<(), Trap> = Ok(cpu.step());
+        let cpures: Result<(), Trap> = Ok(cpu.cycle());
         if !cpures.is_ok() {
             println!("!fault! {:?}", Trap::expose_err(&cpures.err().unwrap()));
             println!("states: {:?}", cpu.general_registers);
             return Ok(());
-        };
+        }; // we shouldnt achieve this with the new and improved handling
 
         if display_cycle % 80 == 0 {
+            // rows
             let vgabuf: Result<Option<Vec<u32>>, Trap> = vgatb.borrow_mut().tick();
             if !vgabuf.is_ok() {
                 println!("!fault! {:?}", Trap::expose_err(&vgabuf.err().unwrap()));
                 return Ok(());
-            }
+            } // this shouldnt happen but it might, the execution cant ACE anything here
             if vgatb.borrow().row == 0 {
+                // are we vblanking?
                 display_buffer = vgabuf.ok().unwrap().unwrap();
                 window
                     .update_with_buffer(&display_buffer, WIDTH, HEIGHT)

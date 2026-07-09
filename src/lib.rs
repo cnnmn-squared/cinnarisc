@@ -3,8 +3,6 @@ pub mod devices;
 pub mod machine;
 pub mod risclib;
 
-pub use assembler::assemble;
-
 pub use risclib::Trap;
 
 pub use machine::Core;
@@ -51,15 +49,15 @@ pub mod elf {
 
     pub enum ElfErr {
         NoMagic,
-        NoELF,
         InvalidArch,
         NotExecutable,
     }
     impl ElfErr {
         pub fn expose(err: &ElfErr) -> &str {
             match err {
-                ElfErr::NoELF => "No ELF header in file (expecting b\"ELF\" in address 1 -> 4)",
-                ElfErr::NoMagic => "No magic number in file (expecting 0x7f in address 0)",
+                ElfErr::NoMagic => {
+                    "No magic number in file (expecting 0x7f in address 0 and 'ELF' in address 1..4)"
+                }
                 ElfErr::InvalidArch => {
                     "Invalid architecture! expected riscv (0xf3) but got something else!"
                 }
@@ -167,7 +165,7 @@ pub mod elf {
             return Err(ElfErr::NoMagic);
         }
         if ehdr.ident[1..4] != *b"ELF" {
-            return Err(ElfErr::NoELF);
+            return Err(ElfErr::NoMagic);
         }
         if ehdr.etype != 0x02 {
             return Err(ElfErr::NotExecutable);
@@ -278,39 +276,4 @@ pub mod elf {
 
         Ok(ehdr.entry)
     }
-
-    /*fn raw(obj: &[u8]) -> Result<&[u8], ElfErr> {
-        let ehdr = give_ehdr(obj);
-        confirm(&ehdr)?;
-        let mut pheaders: Vec<Phdr> = Vec::new();
-        for ientry in 0..ehdr.phnum {
-            let phdr = load_prog(
-                obj,
-                ehdr.phoff as usize + ientry as usize * ehdr.phentsize as usize,
-            );
-            pheaders.push(phdr);
-        }
-
-        for pheader in &pheaders {
-            if pheader.ptype == P_LOAD {
-                println!(
-                    "P_LOAD region {}..{} into memory {} of size {}",
-                    pheader.offset,
-                    pheader.offset + pheader.filesz,
-                    pheader.vaddr,
-                    pheader.memsz
-                );
-
-                for (i, byte) in obj
-                    [pheader.offset as usize..pheader.offset as usize + pheader.filesz as usize]
-                    .iter()
-                    .enumerate()
-                {
-                    let
-                }
-            }
-        }
-
-        Ok(obj)
-    }*/
 }

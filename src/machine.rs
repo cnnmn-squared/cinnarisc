@@ -82,7 +82,7 @@ impl Core {
         // non-commercial specification lists vendor as 0, march is also 0 but can be allocated
         // mimpid 0 if you dont want to implement it (which i dont)
         // mhartid, there must be a hart with id 0 (3.1.5) and we only use 1 hart right?
-        // mstatus/mstatush is confusing 3.1.6 come back
+        // mstatus/mstatush is confusing 3.1.6 //! come back to this
         // i dont think any other csrs are on-setup
 
         let mut csrs: [u32; 4096] = [0; 4096];
@@ -91,7 +91,7 @@ impl Core {
         csrs
     }
 
-    pub fn step(&mut self) {
+    pub fn cycle(&mut self) {
         let pc: u32 = self.pc;
         let fetchresult: Result<u32, Trap> = self.fetch();
         let instruction: u32 = match self.trap_or(fetchresult) {
@@ -101,6 +101,7 @@ impl Core {
                 if !self.fetch().is_ok() {
                     self.double_trap();
                 }
+                self.pc -= 4; // fetch step fwds the pc, but we havent done anything yet
                 u32::MAX
             }
         };
@@ -109,10 +110,15 @@ impl Core {
             return;
         }
 
-        let compresult: Result<(), Trap> = self.compute(pc, instruction);
-        self.trap_or(compresult);
+        let compresult: Result<(), Trap> = self.operate(pc, instruction);
+        // ! pretty sure its easy to get a trap in this step, why do we ignore it??
+        match self.trap_or(compresult) {
+            Some(_) => return,
+            None => self.pc = NMI_VECTOR,
+        }
     }
 
+    /// converts a `Trap` into an `mcause` code or ignores it
     fn trap_or<T>(&mut self, trap: Result<T, Trap>) -> Option<T> {
         if !trap.is_ok() {
             let code = match trap.err().unwrap() {
@@ -161,10 +167,13 @@ impl Core {
         self.reset(true);
     }
 
-    fn compute(&mut self, pc: u32, instruction: u32) -> Result<(), Trap> {
+    /// operation step, decodes + computes
+    fn operate(&mut self, pc: u32, instruction: u32) -> Result<(), Trap> {
         self.general_registers[0] = 0;
 
         match decoder::fetch(instruction, 0, 6) {
+            // (L)oad (U)pper (I)mmediate
+            // rd = imm << 12
             0b0110111 => {
                 self.general_registers[decoder::fetch(instruction, 7, 11) as usize] =
                     (sextend(decoder::fetch(instruction, 12, 31), 20) << 12) as i32;
@@ -176,6 +185,8 @@ impl Core {
                     decoder::fetch(instruction, 12, 31)
                 ));
             }
+            // Add Upper Immediate (to) PC
+            // rd = pc + (imm << 12)
             0b0010111 => {
                 self.general_registers[decoder::fetch(instruction, 7, 11) as usize] = // rd
                     (self.pc as i32 + (decoder::fetch(instruction, 12, 31) << 12)) as i32;
@@ -187,6 +198,8 @@ impl Core {
                     decoder::fetch(instruction, 12, 31)
                 ));
             }
+            // Jump and Link
+            // rd = pc + 4; pc += imm           (1MiB range)
             0b1101111 => {
                 // jal
                 let s12_19 = decoder::fetch(instruction, 12, 19);
@@ -207,15 +220,18 @@ impl Core {
                 self.general_registers[decoder::fetch(instruction, 7, 11) as usize] = // rd
                     (pc + 4) as i32;
 
-                self.trace.push(format!(
-                    "[{:#06x}]  jal x{}, {}",
+                /*self.trace.push(format!(
+                    "[{:#06x}]  jal x{}, {}(x{})",
                     pc,
                     decoder::fetch(instruction, 7, 11),
-                    recons
-                ));
+                    recons,
+                    decoder::fetch(from, lo, hi)
+                ));*/
 
                 // println!("{:#?}", self.trace);
             }
+            // Jump and Link Register
+            // rd = pc + 4; pc = rs1 + imm      (imm has a 4KiB range)
             0b1100111 => {
                 // jalr
                 if decoder::fetch(instruction, 20, 31) % 4 != 0 {
@@ -237,6 +253,8 @@ impl Core {
                 ));
                 // println!("{:#?}", self.trace);
             }
+            // Branches
+            // pc += imms ONLY if rd ?= rs1     (8?KiB range)
             0b1100011 => {
                 // branch
                 let rs1: i32 = self.general_registers[decoder::fetch(instruction, 15, 19) as usize];
@@ -278,7 +296,8 @@ impl Core {
                 ));
                 // println!("{:#?}", self.trace);
             }
-
+            // Load from memory
+            // eg. lb t0, 0(t1) pulls a byte from memory @ t1 into t0
             0b0000011 => {
                 // load
                 let fn3 = decoder::fetch(instruction, 12, 14);
@@ -334,7 +353,8 @@ impl Core {
                     decoder::fetch(instruction, 15, 19),
                 ));
             }
-
+            // store register value into memory (sliced)
+            // eg. sb masks with 0xff
             0b0100011 => {
                 // Store
                 self.bus.store(
@@ -367,7 +387,8 @@ impl Core {
                     decoder::fetch(instruction, 15, 19),
                 ));
             }
-
+            // Immediate-type instructions
+            // rd = rs1 ? imm(12)
             0b0010011 => {
                 // println!("{:#5x}", decoder::fetch(instruction, 20, 31));
                 let imm: i32 = sextend(decoder::fetch(instruction, 20, 31), 12);
@@ -428,7 +449,8 @@ impl Core {
                     instruction
                 ));*/
             }
-
+            // Register type
+            // rd = rs1 ? rs2
             0b0110011 => {
                 // rtype
                 let rs1: i32 = self.general_registers[decoder::fetch(instruction, 15, 19) as usize];
@@ -495,16 +517,17 @@ impl Core {
                     decoder::fetch(instruction, 20, 24),
                 ));
             } // wow! thats all the major rv31i opcodes.
-
+            // FENCE: synchronise instructions
             0b0001111 => return Ok(()), // fence but we dont need to worry. (single-thread)
+            // SYSTEM (explained further in each section)
             0b1110011 => {
                 // ebreak/ecall
                 // 3.3.1
-                self.csr[csr_consts::indexes::MEPC] = pc; // 3.3.1
+                self.csr[csr_consts::indexes::MEPC] = pc; // 3.3.1 //? Machine Exception PC
                 match decoder::fetch(instruction, 20, 31) {
-                    0b0000_0000_0000 => return Err(Trap::ENV_CALL_FROM_M),
-                    0b0000_0000_0001 => return Err(Trap::BREAKPOINT),
-                    0b0011_0000_0010 => self.pc = self.csr[csr_consts::indexes::MEPC],
+                    0b0000_0000_0000 => return Err(Trap::ENV_CALL_FROM_M), // ecall -> ENVIRONMENT CALL FROM MACHINE
+                    0b0000_0000_0001 => return Err(Trap::BREAKPOINT), // ebreak -> BREAKPOINT (propagates to the debugger?)
+                    0b0011_0000_0010 => self.pc = self.csr[csr_consts::indexes::MEPC], // jump back to PC of the exception
                     _ => {
                         self.general_registers[decoder::fetch(instruction, 7, 11) as usize] =
                             match decoder::fetch(instruction, 12, 14) {
@@ -515,7 +538,8 @@ impl Core {
                                         .general_registers
                                         [decoder::fetch(instruction, 15, 19) as usize]
                                         as u32;
-                                    // If rd=x0, then the instruction shall not read the CSR and shall not cause any of the side effects that might occur on a If rd=x0, then the instruction shall not read the CSR and shall not cause any of the side effects that might occur on a CSR read.CSR read. /? ??
+                                    // If rd=x0, then the instruction shall not read the CSR and shall not cause any
+                                    // of the side effects that might occur on a CSR read. //? these CSRs are still pretty stupid so no need to worry
 
                                     csrt as i32
                                 }
@@ -592,6 +616,7 @@ impl Core {
         self.csr[csr_consts::indexes::MCAUSE] = if isdouble { 0x10 } else { 0x00 }; // DOUBLE_TRAP
     }
 
+    /// fetch an instruction from `memory @ pc`, `pc += 4`.
     fn fetch(&mut self) -> Result<u32, Trap> {
         if self.pc % (IALIGN / 8) as u32 != 0 {
             return Err(Trap::INSTRUCTION_ADDRESS_MISALIGNED);
@@ -603,7 +628,7 @@ impl Core {
                     Trap::LOAD_ACCESS_FAULT => Trap::INSTRUCTION_ACCESS_FAULT,
                     Trap::LOAD_ADDRESS_MISALIGNED => Trap::INSTRUCTION_ADDRESS_MISALIGNED, // should be caught by first check
                     Trap::LOAD_PAGE_FAULT => Trap::INSTRUCTION_PAGE_FAULT, // idk what this is
-                    _cause => _cause,                                      // transparent the rest
+                    _cause => _cause,                                      // propagate the rest
                 });
             } // actually map it for once
         };
