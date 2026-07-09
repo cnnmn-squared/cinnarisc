@@ -3,4 +3,5 @@ src/bench
 .vscode
 assembly
 Cargo.lock
-test
+test/nostd
+test/benchy

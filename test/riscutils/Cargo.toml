@@ -1,0 +1,19 @@
+[package]
+name = "riscutils"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+
+
+[profile.dev]
+panic="abort"
+
+[profile.release]
+panic="abort"
+
+[lib]
+name="riscutils"
+test=false
+bench=false

@@ -413,12 +413,12 @@ impl Bus {
 
     pub fn store(&mut self, addr: u32, value: i32, stype: u8) -> Result<(), Trap> {
         let select: &mut Device = self.mut_find_devr_from_addr(addr)?;
-        println!(
+        /*println!(
             "[trace] store {:#x} -> {:#012x}, region responded with {}",
             value,
             addr,
             select.connect.expose()
-        );
+        );*/
 
         //trace
         match &mut select.connect {
@@ -455,6 +455,7 @@ impl Bus {
 pub struct VGATextBuffer {
     owning: DataEnsuredMemory,
     assocb: Vec<u32>,
+    pub row: u32,
 }
 
 impl VGATextBuffer {
@@ -463,6 +464,7 @@ impl VGATextBuffer {
         VGATextBuffer {
             owning: DataEnsuredMemory::new(4000),
             assocb: buffer,
+            row: 0,
         }
     }
 
@@ -508,10 +510,10 @@ impl VGATextBuffer {
         }
     }
 
-    pub fn tick(&mut self) -> Result<Vec<u32>, Trap> {
+    pub fn tick(&mut self) -> Result<Option<Vec<u32>>, Trap> {
         // expose the Vec so i dont have to share the buffer
 
-        for halfi in 0..2000 {
+        for halfi in self.row * 80..self.row * 80 + 80 {
             let half = self.owning.load_half(halfi * 2)?;
             let ch = (half & 0xff) as u8 as char;
             let flags = ((half >> 8) & 0xff) as u8;
@@ -522,6 +524,7 @@ impl VGATextBuffer {
             if ch == 0x00 as char {
                 continue;
             }
+
             self.setchar(
                 ((halfi % 80) * 8) as usize,
                 ((halfi / 80) * 16) as usize,
@@ -530,7 +533,12 @@ impl VGATextBuffer {
                 fback,
             );
         }
+        self.row = (self.row + 1) % 25;
 
-        Ok(self.assocb.clone()) // ! performance
+        Ok(if self.row == 0 {
+            Some(self.assocb.clone())
+        } else {
+            None
+        }) // ! performance
     }
 }

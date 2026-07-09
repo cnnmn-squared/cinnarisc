@@ -1,5 +1,6 @@
 use riscy::Error;
 use riscy::args;
+use riscy::devices::Random;
 use riscy::{File, Read}; // Write
 use riscy::{Rc, RefCell};
 
@@ -9,23 +10,11 @@ use riscy::Bus;
 use riscy::Core;
 use riscy::VGATextBuffer;
 use riscy::devices::StdMemory;
-// use riscy::risclib::file_processor::newfile;
 use riscy::{Device, DeviceOption};
 use riscy::{HEIGHT, WIDTH};
 
 use riscy::Trap;
-// use riscy::assemble;
 use riscy::elf;
-
-/*fn trap<T>(result: Result<T, Trap>) -> Result<T, Box<dyn Error>> {
-    // trap to stderror
-    if !result.is_ok() {
-        println!("!fault! {:?}", Trap::expose_err(&result.err().unwrap()));
-        return Err(Box::new(std::fmt::Error));
-    }
-
-    Ok(result.ok().unwrap())
-}*/
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = args().collect(); // args is a Vec<stirng> wrapper
@@ -49,6 +38,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             0xb8000 + 4000,
             DeviceOption::VGATextBuffer(Rc::clone(&vgatb)),
         ),
+        Device::new(0xb9000, 0xb9004, DeviceOption::Random(Random::new())),
     ]);
 
     let mut cpu: Core = Core::new(bus, entry);
@@ -70,23 +60,32 @@ fn main() -> Result<(), Box<dyn Error>> {
         cpu.pc, entry
     );
 
+    let mut display_cycle: u32 = 0;
+    let mut display_buffer: Vec<u32>;
+
     while window.is_open() {
         let cpures: Result<(), Trap> = Ok(cpu.step());
-        let vgabuf: Result<Vec<u32>, Trap> = vgatb.borrow_mut().tick();
         if !cpures.is_ok() {
             println!("!fault! {:?}", Trap::expose_err(&cpures.err().unwrap()));
             println!("states: {:?}", cpu.general_registers);
             return Ok(());
         };
 
-        if !vgabuf.is_ok() {
-            println!("!fault! {:?}", Trap::expose_err(&vgabuf.err().unwrap()));
-            return Ok(());
+        if display_cycle % 80 == 0 {
+            let vgabuf: Result<Option<Vec<u32>>, Trap> = vgatb.borrow_mut().tick();
+            if !vgabuf.is_ok() {
+                println!("!fault! {:?}", Trap::expose_err(&vgabuf.err().unwrap()));
+                return Ok(());
+            }
+            if vgatb.borrow().row == 0 {
+                display_buffer = vgabuf.ok().unwrap().unwrap();
+                window
+                    .update_with_buffer(&display_buffer, WIDTH, HEIGHT)
+                    .unwrap();
+            }
         }
 
-        window
-            .update_with_buffer(&vgabuf.ok().unwrap(), WIDTH, HEIGHT)
-            .unwrap();
+        display_cycle += 1;
     }
     Ok(())
 }
